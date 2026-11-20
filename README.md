@@ -6,6 +6,8 @@ Browser-basierter Aim-Trainer (Three.js). Die fertige App ist **eine einzige Dat
 ## Funktionen
 - **Training**: Raster (3 Ziele), Flick, Mikro, Tracking – Ziel getroffen → neues Ziel erscheint
 - **Bewegungsanalyse** nach jeder Runde: Reaktionszeit, Überschießen/Unterschießen, Korrekturzeit
+- **Trefferbild** nach jeder Runde: Zielscheibe mit allen Einschüssen (Bildschirm- oder Bewegungsrichtungs-Ansicht),
+  Abstand zur Mitte, Streuung, mittlere Abweichung, Fehlschüsse zu kurz/zu weit; beim Tracking Vorhalt/Nachlauf
 - **Sensitivitäts-Finder**: Blindtests im Paarvergleich, der Bereich wird pro Runde enger,
   danach Feinjustierung anhand deines Bewegungsmusters
 - **Sensitivität**: dein Wert als cm/360° und welcher Wert in welchem Spiel einzutragen ist

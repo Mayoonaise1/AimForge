@@ -1,7 +1,7 @@
 import { Engine } from './engine.js';
 import { Session, MODES } from './session.js';
 import { SensFinder } from './finder.js';
-import { biasAdvice } from './analysis.js';
+import { biasAdvice, shotStats, shotAdvice } from './analysis.js';
 import { GAMES, gameById, cm360From, sensFrom, settingFor, yawFromMeasurement, fmtSens } from './games.js';
 
 // ---------- Speicher ----------
@@ -174,7 +174,8 @@ function finish() {
   res.game = S.game;
   res.sensInGame = sensFrom(p.cm, curYaw(), S.dpi);
   if (!p.opts.noHistory) {
-    history.push(res);
+    const { shotLog, ...stored } = res; // Einzelschüsse nur für die Ergebnisseite, nicht im Verlauf speichern
+    history.push(stored);
     if (history.length > 500) history = history.slice(-500);
     save('aimforge.history', history);
   }
@@ -252,18 +253,118 @@ function adviceBox(a) {
 
 function showResults(r) {
   const el = $('page');
-  const prev = history.filter((h) => h.mode === r.mode && h !== r);
+  const prev = history.filter((h) => h.mode === r.mode && h.date !== r.date);
   const best = prev.length ? Math.max(...prev.map((h) => h.score)) : null;
   const a = r.onTarget === undefined ? biasAdvice(r) : null;
+  const prevScore = best;
   el.innerHTML = `<h2>Ergebnis – ${MODES[r.mode].name}</h2>
-    ${best !== null ? `<p class="muted">${r.score > best ? '🏆 Neuer Bestwert!' : `Bestwert: ${best}`}</p>` : ''}
+    ${prevScore !== null ? `<p class="muted">${r.score > prevScore ? '🏆 Neuer Bestwert!' : `Bestwert: ${prevScore}`}</p>` : ''}
     <div class="stats">${resultStats(r)}</div>
+    ${shotSection(r)}
     ${a ? `<h3>Bewegungsanalyse</h3>${adviceBox(a)}
       <p class="muted"><small>„Erste Bewegung erreicht“: Wie weit dein schneller Anfangs-Flick in Richtung Ziel kommt, bevor du abbremst.
       Leicht unter 100 % ist ideal – darüber überschießt du, weit darunter brauchst du viele Korrekturen.</small></p>` : ''}
     <div class="row"><button class="primary" id="again">Nochmal</button><button id="back">Zurück</button></div>`;
   $('again').onclick = () => play(r.mode);
   $('back').onclick = render;
+  bindShotSection(r);
+}
+
+// ----- Trefferbild -----
+const deg = (v) => (isFinite(v) ? n(v, 2) + '°' : '–');
+
+/** SVG-Zielscheibe; Abstände relativ zum Zielradius, damit alle Ziele gleich groß erscheinen */
+function targetDiagram(shots, view) {
+  const W = 340, c = W / 2, R = 50, MAX = 3.1;
+  let pts = '';
+  const track = shots[0]?.track;
+  let sx = 0, sy = 0, cnt = 0;
+  for (const s of shots) {
+    let x = s.dx / s.r, y = s.dy / s.r;
+    if (view === 'dir') {
+      if (s.ux === null || s.ux === undefined) continue;
+      const along = x * s.ux + y * s.uy, across = -x * s.uy + y * s.ux;
+      x = along; y = across;
+    }
+    const d = Math.hypot(x, y);
+    if (d <= 3) { sx += x; sy += y; cnt++; }
+    const out = d > MAX;
+    if (out) { x *= MAX / d; y *= MAX / d; }
+    const px = (c + x * R).toFixed(1), py = (c - y * R).toFixed(1);
+    if (track) {
+      pts += `<circle cx="${px}" cy="${py}" r="1.8" fill="${s.hit ? '#4fd1a5' : '#ff5d6c'}" opacity=".45"/>`;
+    } else if (s.hit) {
+      pts += `<circle cx="${px}" cy="${py}" r="4" fill="#4fd1a5" stroke="#0b1a14" stroke-width="1.2"/>`;
+    } else if (out) {
+      pts += `<circle cx="${px}" cy="${py}" r="4" fill="none" stroke="#ff5d6c" stroke-width="1.5"/>`;
+    } else {
+      pts += `<path d="M${px - 4} ${py - 4}L${+px + 4} ${+py + 4}M${+px + 4} ${py - 4}L${px - 4} ${+py + 4}" stroke="#ff5d6c" stroke-width="2"/>`;
+    }
+  }
+  const mean = cnt ? `<path d="M${c + (sx / cnt) * R - 8} ${c - (sy / cnt) * R}h16M${c + (sx / cnt) * R} ${c - (sy / cnt) * R - 8}v16" stroke="#ffb648" stroke-width="2.5"/>` : '';
+  const rings = [3, 2].map((k) => `<circle cx="${c}" cy="${c}" r="${k * R}" fill="none" stroke="#313a48" stroke-dasharray="4 4"/>
+      <text x="${c + k * R * 0.707 + 4}" y="${c - k * R * 0.707 - 4}" fill="#6b7586" font-size="10">${k}×</text>`).join('');
+  const [lo, hi, dirText] = track ? ['hinterher', 'voraus', 'Laufrichtung des Ziels →'] : ['zu kurz', 'zu weit', 'Bewegungsrichtung →'];
+  const labels = view === 'dir'
+    ? `<text x="10" y="${c - 6}" fill="#95a0b2" font-size="11">${lo}</text><text x="${W - 10}" y="${c - 6}" fill="#95a0b2" font-size="11" text-anchor="end">${hi}</text>
+       <text x="${c}" y="${W - 8}" fill="#95a0b2" font-size="11" text-anchor="middle">${dirText}</text>`
+    : `<text x="${c}" y="14" fill="#6b7586" font-size="11" text-anchor="middle">oben</text><text x="${c}" y="${W - 6}" fill="#6b7586" font-size="11" text-anchor="middle">unten</text>
+       <text x="6" y="${c + 4}" fill="#6b7586" font-size="11">links</text><text x="${W - 6}" y="${c + 4}" fill="#6b7586" font-size="11" text-anchor="end">rechts</text>`;
+  return `<svg viewBox="0 0 ${W} ${W}" width="100%" style="max-width:${W}px;display:block;background:var(--bg);border-radius:12px" role="img" aria-label="Trefferbild">
+    ${rings}
+    <circle cx="${c}" cy="${c}" r="${R}" fill="rgba(255,77,94,.16)" stroke="#ff4d5e" stroke-width="2"/>
+    <circle cx="${c}" cy="${c}" r="${R / 2}" fill="none" stroke="rgba(255,77,94,.45)"/>
+    <path d="M${c - 6} ${c}h12M${c} ${c - 6}v12" stroke="#ff4d5e" stroke-width="1"/>
+    ${labels}${pts}${mean}</svg>`;
+}
+
+function shotSection(r) {
+  const st = shotStats(r.shotLog);
+  if (!st) return '';
+  const lr = Math.abs(st.biasX) < 0.005 ? '' : `${deg(Math.abs(st.biasX))} ${st.biasX > 0 ? 'rechts' : 'links'}`;
+  const ou = Math.abs(st.biasY) < 0.005 ? '' : `${deg(Math.abs(st.biasY))} ${st.biasY > 0 ? 'oben' : 'unten'}`;
+  const bias = [lr, ou].filter(Boolean).join(' · ') || 'keine';
+  const figures = st.track
+    ? stat('Ø Abstand zur Zielmitte', deg(st.allDist)) + stat('Streuung', deg(st.spread)) + stat('Mittlere Abweichung', bias) +
+      stat('Vorhalt (+) / Nachlauf (−)', `${st.lead >= 0 ? '+' : ''}${Math.round(st.lead * 100)} % Radius`)
+    : stat('Ø Abstand Treffer zur Mitte', `${deg(st.centerDist)} <small style="font-size:12px">(${Math.round(st.centerDistN * 100)} % Radius)</small>`) +
+      stat('Streuung', deg(st.spread)) + stat('Mittlere Abweichung', bias) +
+      stat('Fehlschüsse zu kurz / zu weit', `${st.missShort} / ${st.missFar}`);
+  const legend = st.track
+    ? '<span style="color:var(--accent)">●</span> auf dem Ziel · <span style="color:var(--bad)">●</span> daneben (alle 50 ms gemessen)'
+    : '<span style="color:var(--accent)">●</span> Treffer · <span style="color:var(--bad)">✕</span> Fehlschuss · <span style="color:var(--bad)">○</span> weit daneben (am Rand)';
+  return `<h3 style="margin-top:8px">Trefferbild</h3>
+    <div style="display:grid;grid-template-columns:minmax(260px,340px) 1fr;gap:20px;align-items:start" class="shotgrid">
+      <div><div class="row" style="margin-bottom:10px">
+          <button id="vDir" class="primary" style="padding:5px 12px">Bewegungsrichtung</button>
+          <button id="vScreen" style="padding:5px 12px">Bildschirm</button></div>
+        <div id="diagram"></div>
+        <p class="muted" style="font-size:12px;margin-top:8px">${legend} · <span style="color:var(--warn)">+</span> Mittelpunkt deiner Schüsse.
+          Der rote Kreis ist das Ziel, alle Ziele sind auf dieselbe Größe skaliert.</p></div>
+      <div><p class="muted" id="viewInfo" style="margin-top:0"></p>
+        <div class="stats" style="margin-top:0;grid-template-columns:repeat(auto-fill,minmax(170px,1fr))">${figures}</div>
+        ${shotAdvice(st).map(adviceBox).join('')}</div>
+    </div>`;
+}
+
+function bindShotSection(r) {
+  if (!$('diagram')) return;
+  const track = r.shotLog[0]?.track;
+  const info = {
+    dir: track
+      ? 'Gedreht in die Laufrichtung des Ziels: Punkte rechts der Mitte = du warst voraus, links = du hingst hinterher.'
+      : 'Jeder Schuss ist so gedreht, als wärst du von links gekommen: rechts der Mitte = über das Ziel hinaus, links = zu früh/zu kurz.',
+    screen: 'So, wie du es auf dem Bildschirm gesehen hast: oben, unten, links, rechts.',
+  };
+  const show = (v) => {
+    $('diagram').innerHTML = targetDiagram(r.shotLog, v);
+    $('viewInfo').textContent = info[v];
+    $('vDir').className = v === 'dir' ? 'primary' : '';
+    $('vScreen').className = v === 'screen' ? 'primary' : '';
+  };
+  $('vDir').onclick = () => show('dir');
+  $('vScreen').onclick = () => show('screen');
+  show('dir');
 }
 
 // ----- Sensitivität (eigener Wert, Werte pro Spiel, Kalibrierung, Export) -----

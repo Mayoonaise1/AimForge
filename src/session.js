@@ -75,6 +75,8 @@ export class Session {
     this.onTarget = 0;
     this.lastKill = null;
     this.lastHitTime = 0;
+    this.shotLog = []; // Abweichung jedes Schusses (bzw. Tracking-Stichprobe) zur Zielmitte
+    this.nextTrackSample = 0;
   }
 
   view() {
@@ -109,6 +111,7 @@ export class Session {
     if (!this.running || this.mode.type !== 'click') return;
     this.shots++;
     const hit = this.engine.pick();
+    this._logShot(t, hit);
     if (!hit) { this.sound?.('miss'); return; }
     this.hits++;
     this.sound?.('hit');
@@ -120,6 +123,24 @@ export class Session {
     this.lastKill = { x: hit.x, y: hit.y };
     this.engine.removeTarget(hit);
     this._spawn(t);
+  }
+
+  /** Abweichung des Schusses zum (nächstgelegenen) Ziel merken, plus Bewegungsrichtung zum Ziel */
+  _logShot(t, hit) {
+    const e = this.engine;
+    let near = hit;
+    if (!near) {
+      let best = Infinity;
+      for (const tg of e.targets) { const a = e.angleTo(tg); if (a < best) { best = a; near = tg; } }
+    }
+    if (!near) return;
+    const start = this._viewAt(Math.max(this.lastHitTime, near.born));
+    const mx = near.x - start.x, my = near.y - start.y, md = Math.hypot(mx, my);
+    this.shotLog.push({
+      dx: e.x - near.x, dy: e.y - near.y, r: near.radiusDeg, hit: !!hit,
+      // Richtung nur bei echten Bewegungen sinnvoll (sonst Zufallsrauschen)
+      ux: md > near.radiusDeg * 2 ? mx / md : null, uy: md > near.radiusDeg * 2 ? my / md : null,
+    });
   }
 
   _viewAt(t) {
@@ -151,6 +172,11 @@ export class Session {
       this.engine.moveTarget(tr.t, x, y);
       const on = this.engine.angleTo(tr.t) <= tr.t.radiusDeg;
       if (on) this.onTarget += dt;
+      if (now >= this.nextTrackSample) {
+        this.nextTrackSample = now + 50;
+        const v = Math.hypot(tr.vx, tr.vy) || 1;
+        this.shotLog.push({ dx: this.engine.x - x, dy: this.engine.y - y, r: tr.t.radiusDeg, hit: on, ux: tr.vx / v, uy: tr.vy / v, track: true });
+      }
       tr.t.mesh.material.emissiveIntensity = on ? 0.9 : 0.15;
     }
     if (this.elapsed >= this.duration) {
@@ -181,7 +207,7 @@ export class Session {
 
   results() {
     const live = this.liveStats();
-    const base = { mode: this.modeId, date: Date.now(), duration: this.duration / 1000, score: live.score, acc: live.acc };
+    const base = { mode: this.modeId, date: Date.now(), duration: this.duration / 1000, score: live.score, acc: live.acc, shotLog: this.shotLog };
     if (this.mode.type === 'track') return { ...base, onTarget: live.acc };
     return {
       ...base,
