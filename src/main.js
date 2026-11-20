@@ -200,6 +200,7 @@ function finish() {
   res.cm360 = p.cm;
   res.game = S.game;
   res.sensInGame = sensFrom(p.cm, curYaw(), S.dpi);
+  if (p.opts.warmup) res.warmup = true;
   if (!p.opts.noHistory) {
     const { shotLog, ...stored } = res; // Einzelschüsse nur für die Ergebnisseite, nicht im Verlauf speichern
     history.push(stored);
@@ -245,8 +246,11 @@ function updateSensbox() {
     <small>${esc(shortName(gameById(S.game)))}: ${fmtSens(S.sens)} @ ${S.dpi} DPI</small>`;
 }
 
+/** Aufwärmrunden sind kürzer -> nicht mit normalen Runden vergleichen */
+const ranked = (mode) => history.filter((r) => r.mode === mode && !r.warmup);
+
 function bestOf(mode) {
-  const h = history.filter((r) => r.mode === mode);
+  const h = ranked(mode);
   return h.length ? Math.max(...h.map((r) => r.score)) : null;
 }
 
@@ -258,11 +262,45 @@ function pageTrain(el) {
       ${best !== null ? `<div class="best">Bestwert: ${best}</div>` : ''}</div>`;
   }).join('');
   el.innerHTML = `<h2>Training</h2><p class="muted">Wähle ein Szenario. Gespielt wird mit deiner Sensitivität
-    (${n(curCm(), 1)} cm/360°, Seite „Sensitivität“) und ${n(S.fov, 1)}° FOV (Einstellungen).</p><div class="cards">${cards}</div>
+    (${n(curCm(), 1)} cm/360°, Seite „Sensitivität“) und ${n(S.fov, 1)}° FOV (Einstellungen).</p>
+    <div class="card click" id="warmupCard" style="margin-bottom:14px;border-color:var(--accent2)"><h3>🔥 Aufwärmen · ${WARMUP.length * WARMUP_SECONDS / 60} Minuten</h3>
+      <p class="muted" style="margin:0">${WARMUP.map((id) => MODES[id].name).join(' → ')}, je ${WARMUP_SECONDS} Sekunden am Stück. Ideal vor dem Spielen
+      oder vor dem Sens-Finder. Zählt nicht für Bestwerte.</p></div>
+    <div class="cards">${cards}</div>
     <div class="card" style="margin-top:20px"><h3>Tipps für genaue Messwerte</h3>
     <p class="muted">Nutze Chrome oder Edge (Raw Input wird dort unterstützt). Schalte im Betriebssystem die Mausbeschleunigung
     („Zeigerbeschleunigung verbessern“) aus. Spiele im Vollbild (F11), damit nichts ablenkt.</p></div>`;
   el.querySelectorAll('[data-mode]').forEach((c) => (c.onclick = () => play(c.dataset.mode)));
+  $('warmupCard').onclick = () => startWarmup(() => { page = 'train'; render(); });
+}
+
+// ----- Aufwärm-Playlist -----
+const WARMUP = ['grid', 'flick', 'micro', 'track'];
+const WARMUP_SECONDS = 30;
+
+/** spielt alle Aufwärm-Szenarien nacheinander; then() wird nach der Zusammenfassung aufgerufen */
+function startWarmup(then) {
+  const results = [];
+  const next = (i) => {
+    if (i >= WARMUP.length) return warmupSummary(results, then);
+    play(WARMUP[i], {
+      duration: WARMUP_SECONDS, warmup: true,
+      title: `Aufwärmen ${i + 1}/${WARMUP.length} – ${MODES[WARMUP[i]].name}`,
+      onDone: (res) => { results.push(res); next(i + 1); },
+      onAbort: () => (results.length ? warmupSummary(results, then) : then()),
+    });
+  };
+  next(0);
+}
+
+function warmupSummary(results, then) {
+  const el = $('page');
+  const rows = results.map((r) => `<tr><td>${MODES[r.mode].name}</td><td class="num">${r.score}</td><td class="num">${n(r.acc, 1)} %</td></tr>`).join('');
+  el.innerHTML = `<h2>Aufwärmen abgeschlossen</h2>
+    <p class="muted">${results.length} von ${WARMUP.length} Szenarien gespielt. Die Runden findest du auch unter „Statistik“ (mit Trefferbild).</p>
+    <table style="max-width:520px"><tr><th>Szenario</th><th class="num">Punkte</th><th class="num">Genauigkeit</th></tr>${rows}</table>
+    <div class="row" style="margin-top:18px"><button class="primary" id="wNext">Weiter</button></div>`;
+  $('wNext').onclick = then;
 }
 
 function resultStats(r) {
@@ -467,7 +505,7 @@ function pageSens(el) {
         <div class="grid2" style="grid-template-columns:1fr 1fr">
           <div style="grid-column:1/-1"><label>Ausgehend von Spiel</label><select id="sGame">${options}</select></div>
           <div><label>Sensitivität dort</label><input id="sSens" type="text" inputmode="decimal" value="${S.sens}"></div>
-          <div><label>Maus-DPI</label><input id="sDpi" type="text" inputmode="numeric" value="${S.dpi}"></div>
+          <div><label>Maus-DPI <a href="#" id="sDpiCheck" style="color:var(--accent);font-size:12px">nachmessen</a></label><input id="sDpi" type="text" inputmode="numeric" value="${S.dpi}"></div>
         </div>
         <div class="big" id="sValue" style="margin-top:12px"></div><small id="sValueSub"></small></div>
       <div class="card"><h3>Einmal pro Spiel prüfen</h3><p class="muted" style="margin:0"><small>
@@ -548,6 +586,7 @@ function pageSens(el) {
     if (g.fov) S.fov = g.fov;
     saveSettings(); render();
   };
+  $('sDpiCheck').onclick = (e) => { e.preventDefault(); mouseCheck(render); };
   $('sSens').oninput = (e) => { const v = parseNum(e.target.value); if (v > 0) { S.sens = v; saveSettings(); draw(); } };
   $('sDpi').oninput = (e) => { const v = parseNum(e.target.value); if (v > 0) { S.dpi = v; saveSettings(); draw(); } };
   el.querySelectorAll('[data-g]').forEach((c) => (c.onchange = () => {
@@ -574,11 +613,13 @@ function pageFinder(el) {
       <div><label>Dauer pro Test</label><select id="fDur">${[20, 30, 45].map((d) => `<option ${d == S.finderDuration ? 'selected' : ''} value="${d}">${d} s</option>`).join('')}</select></div>
       <div><label>Runden</label><select id="fRounds">${[4, 5, 6, 7].map((d) => `<option ${d == S.finderRounds ? 'selected' : ''} value="${d}">${d} (≈ ${Math.round(d * 2 * S.finderDuration / 60 + d * 0.5)} min)</option>`).join('')}</select></div>
     </div></div>
-    <p class="muted" style="margin-top:14px">Tipp: Spiel dich vorher 2–3 Minuten warm, damit die ersten Tests nicht schlechter ausfallen.</p>
-    <button class="primary" id="fStart">Finder starten</button>`;
+    <p class="muted" style="margin-top:14px">Tipp: Spiel dich vorher warm, damit die ersten Tests nicht schlechter ausfallen als die späteren.</p>
+    <div class="row"><button class="primary" id="fStart">Finder starten</button>
+      <button id="fWarm">Erst aufwärmen (${WARMUP.length * WARMUP_SECONDS / 60} min), dann Finder</button></div>`;
   $('fDur').onchange = (e) => { S.finderDuration = +e.target.value; saveSettings(); render(); };
   $('fRounds').onchange = (e) => { S.finderRounds = +e.target.value; saveSettings(); };
   $('fStart').onclick = () => { finder = new SensFinder(curCm(), S.finderRounds); render(); };
+  $('fWarm').onclick = () => startWarmup(() => { page = 'finder'; finder = new SensFinder(curCm(), S.finderRounds); render(); });
 }
 
 function finderStep(el) {
@@ -670,10 +711,110 @@ function finderResult(el) {
 }
 
 // ----- Statistik -----
+const C_RUN = '#2aa87f', C_AVG = '#6487ea'; // geprüft: unterscheidbar auch bei Farbsehschwäche
+let statMode = null, statMetric = 'score';
+
+/** Fortschritt eines Szenarios: jede Runde + gleitender Durchschnitt der letzten 5 */
+function progressChart(box, runs, metric) {
+  const val = (r) => (metric === 'acc' ? r.acc : r.score);
+  const ys = runs.map(val);
+  const avg = ys.map((_, i) => { const w = ys.slice(Math.max(0, i - 4), i + 1); return w.reduce((a, b) => a + b, 0) / w.length; });
+  const W = 800, H = 260, L = 52, R = 16, T = 14, B = 34;
+  let lo = Math.min(...ys), hi = Math.max(...ys);
+  if (metric === 'acc') { lo = Math.max(0, Math.floor((lo - 5) / 10) * 10); hi = Math.min(100, Math.ceil((hi + 5) / 10) * 10); }
+  else { const pad = (hi - lo) * 0.15 || hi * 0.1 || 10; lo = Math.max(0, lo - pad); hi = hi + pad; }
+  const step = niceStep((hi - lo) / 4);
+  lo = Math.floor(lo / step) * step; hi = Math.ceil(hi / step) * step;
+  const X = (i) => L + (runs.length === 1 ? (W - L - R) / 2 : (i / (runs.length - 1)) * (W - L - R));
+  const Y = (v) => T + (1 - (v - lo) / (hi - lo || 1)) * (H - T - B);
+  let grid = '';
+  for (let v = lo; v <= hi + step / 2; v += step) {
+    grid += `<line x1="${L}" x2="${W - R}" y1="${Y(v)}" y2="${Y(v)}" stroke="#2a313d" stroke-width="1"/>
+      <text x="${L - 8}" y="${Y(v) + 4}" fill="#95a0b2" font-size="11" text-anchor="end">${metric === 'acc' ? v + ' %' : Math.round(v)}</text>`;
+  }
+  const xt = [0, Math.floor((runs.length - 1) / 2), runs.length - 1].filter((v, i, a) => a.indexOf(v) === i)
+    .map((i) => `<text x="${X(i)}" y="${H - 10}" fill="#95a0b2" font-size="11" text-anchor="${runs.length === 1 ? 'middle' : i === 0 ? 'start' : i === runs.length - 1 ? 'end' : 'middle'}">Runde ${i + 1}</text>`).join('');
+  const path = (arr) => arr.map((v, i) => `${i ? 'L' : 'M'}${X(i).toFixed(1)} ${Y(v).toFixed(1)}`).join('');
+  const dots = ys.map((v, i) => `<circle cx="${X(i)}" cy="${Y(v)}" r="4" fill="${C_RUN}" stroke="#1b2029" stroke-width="2"/>`).join('');
+  const last = runs.length - 1;
+  box.innerHTML = `<div class="row" style="gap:18px;margin-bottom:6px;font-size:13px">
+      <span><svg width="22" height="10"><line x1="0" x2="22" y1="5" y2="5" stroke="${C_RUN}" stroke-width="2"/><circle cx="11" cy="5" r="4" fill="${C_RUN}"/></svg> Einzelne Runde</span>
+      <span><svg width="22" height="10"><line x1="0" x2="22" y1="5" y2="5" stroke="${C_AVG}" stroke-width="2" stroke-dasharray="5 3"/></svg> Durchschnitt der letzten 5</span></div>
+    <div style="position:relative">
+      <svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="Fortschritt" style="display:block;background:var(--panel);border-radius:10px">
+        ${grid}${xt}
+        <line x1="${L}" x2="${W - R}" y1="${H - B}" y2="${H - B}" stroke="#3a4252"/>
+        <path d="${path(ys)}" fill="none" stroke="${C_RUN}" stroke-width="2" stroke-opacity=".55"/>
+        <path d="${path(avg)}" fill="none" stroke="${C_AVG}" stroke-width="2" stroke-dasharray="6 4"/>
+        ${dots}
+        <text x="${Math.min(X(last) + 8, W - R)}" y="${Y(avg[last]) - 8}" fill="#e8ecf2" font-size="12" text-anchor="${runs.length > 1 ? 'end' : 'start'}">Ø ${metric === 'acc' ? n(avg[last], 1) + ' %' : Math.round(avg[last])}</text>
+        <line data-cross x1="0" x2="0" y1="${T}" y2="${H - B}" stroke="#95a0b2" stroke-dasharray="3 3" visibility="hidden"/>
+        <rect data-hit x="${L}" y="${T}" width="${W - L - R}" height="${H - T - B}" fill="transparent"/>
+      </svg>
+      <div data-tip class="hidden" style="position:absolute;top:8px;pointer-events:none;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 10px;font-size:12px;white-space:nowrap"></div>
+    </div>`;
+  const svg = box.querySelector('svg[role=img]'), tip = box.querySelector('[data-tip]'), cross = box.querySelector('[data-cross]');
+  const hit = box.querySelector('[data-hit]');
+  hit.onmousemove = (e) => {
+    const rect = svg.getBoundingClientRect();
+    const sx = ((e.clientX - rect.left) / rect.width) * W;
+    let i = runs.length === 1 ? 0 : Math.round(((sx - L) / (W - L - R)) * (runs.length - 1));
+    i = Math.max(0, Math.min(last, i));
+    const r = runs[i];
+    cross.setAttribute('x1', X(i)); cross.setAttribute('x2', X(i)); cross.setAttribute('visibility', 'visible');
+    tip.innerHTML = `<b>Runde ${i + 1}</b> · ${new Date(r.date).toLocaleString('de-DE', { dateStyle: 'short', timeStyle: 'short' })}<br>
+      Punkte ${r.score} · Genauigkeit ${n(r.acc, 1)} %<br>Ø letzte 5: ${metric === 'acc' ? n(avg[i], 1) + ' %' : Math.round(avg[i])} · ${n(r.cm360, 1)} cm/360°`;
+    tip.classList.remove('hidden');
+    const px = (X(i) / W) * rect.width;
+    tip.style.left = (px > rect.width / 2 ? px - tip.offsetWidth - 12 : px + 12) + 'px';
+  };
+  hit.onmouseleave = () => { tip.classList.add('hidden'); cross.setAttribute('visibility', 'hidden'); };
+}
+
+/** Eintrag aus einer Import-Datei auf bekannte Felder und Zahlen reduzieren */
+const RUN_NUM = ['date', 'duration', 'score', 'acc', 'hits', 'shots', 'kps', 'flicks', 'avgTtk', 'reaction', 'ratio',
+  'overshootRate', 'undershootRate', 'correction', 'onTarget', 'cm360', 'sensInGame'];
+function cleanRun(r) {
+  if (!r || typeof r !== 'object' || !(MODES[r.mode] || r.mode === 'finderResult')) return null;
+  const out = { mode: r.mode };
+  for (const k of RUN_NUM) if (k in r) out[k] = r[k] === null ? NaN : Number(r[k]);
+  if (!(out.date > 0) || !isFinite(out.score) || !isFinite(out.cm360 ?? 0)) return null;
+  if (out.mode !== 'finderResult' && !isFinite(out.acc)) return null;
+  if (r.warmup === true) out.warmup = true;
+  if (typeof r.game === 'string' && GAMES.some((g) => g.id === r.game)) out.game = r.game;
+  return out;
+}
+function cleanCalib(c) {
+  const out = {};
+  for (const g of GAMES) {
+    const v = c && c[g.id];
+    if (v && Number(v.yaw) > 0) out[g.id] = { yaw: Number(v.yaw), sens: Number(v.sens) || undefined, cm: Number(v.cm) || undefined, dpi: Number(v.dpi) || undefined, date: Number(v.date) || undefined };
+  }
+  return out;
+}
+
+function niceStep(raw) {
+  const p = 10 ** Math.floor(Math.log10(raw || 1));
+  const f = raw / p;
+  return (f <= 1 ? 1 : f <= 2 ? 2 : f <= 5 ? 5 : 10) * p;
+}
+
+function trendText(runs, metric) {
+  if (runs.length < 6) return `Noch ${6 - runs.length} Runde${runs.length === 5 ? '' : 'n'} bis zur ersten Trendaussage.`;
+  const val = (r) => (metric === 'acc' ? r.acc : r.score);
+  const k = Math.min(5, Math.floor(runs.length / 2));
+  const first = runs.slice(0, k).reduce((a, r) => a + val(r), 0) / k;
+  const lastAvg = runs.slice(-k).reduce((a, r) => a + val(r), 0) / k;
+  const d = metric === 'acc' ? lastAvg - first : ((lastAvg / first) - 1) * 100;
+  const unit = metric === 'acc' ? ' Prozentpunkte' : ' %';
+  if (Math.abs(d) < (metric === 'acc' ? 1 : 3)) return `Stabil: deine letzten ${k} Runden liegen etwa auf dem Niveau deiner ersten ${k}.`;
+  return `${d > 0 ? '📈 Besser' : '📉 Schwächer'}: deine letzten ${k} Runden liegen im Schnitt ${n(Math.abs(d), 1)}${unit} ${d > 0 ? 'über' : 'unter'} deinen ersten ${k}.`;
+}
+
 function pageStats(el) {
   const modes = Object.entries(MODES).filter(([, m]) => !m.hidden);
   const summary = modes.map(([id, m]) => {
-    const h = history.filter((r) => r.mode === id);
+    const h = ranked(id);
     if (!h.length) return `<tr><td>${m.name}</td><td class="num">0</td><td class="num">–</td><td class="num">–</td><td class="num">–</td></tr>`;
     const last = h.slice(-10);
     const avg = last.reduce((s, r) => s + r.score, 0) / last.length;
@@ -681,17 +822,42 @@ function pageStats(el) {
     return `<tr><td>${m.name}</td><td class="num">${h.length}</td><td class="num">${Math.max(...h.map((r) => r.score))}</td>
       <td class="num">${Math.round(avg)}</td><td class="num">${n(avgAcc, 1)} %</td></tr>`;
   }).join('');
+  const played = modes.filter(([id]) => ranked(id).length);
+  if (!statMode || !ranked(statMode).length) {
+    const lastRun = history.filter((r) => MODES[r.mode] && !MODES[r.mode].hidden && !r.warmup).sort((x, y) => y.date - x.date)[0];
+    statMode = lastRun?.mode ?? null;
+  }
   const rows = history.slice(-40).reverse().map((r) => {
     const d = new Date(r.date).toLocaleString('de-DE', { dateStyle: 'short', timeStyle: 'short' });
     if (r.mode === 'finderResult') return `<tr><td>${d}</td><td>Sens-Finder</td><td class="num" colspan="2">Ergebnis übernommen</td><td class="num">${n(r.cm360, 1)}</td></tr>`;
-    return `<tr class="expand" data-date="${r.date}"><td><span class="arrow">▸</span> ${d}</td><td>${MODES[r.mode]?.name ?? r.mode}</td><td class="num">${r.score}</td><td class="num">${n(r.acc, 1)} %</td><td class="num">${n(r.cm360, 1)}</td></tr>`;
+    return `<tr class="expand" data-date="${r.date}"><td><span class="arrow">▸</span> ${d}</td><td>${MODES[r.mode]?.name ?? r.mode}${r.warmup ? ' <small>(Aufwärmen)</small>' : ''}</td><td class="num">${r.score}</td><td class="num">${n(r.acc, 1)} %</td><td class="num">${n(r.cm360, 1)}</td></tr>`;
   }).join('');
   el.innerHTML = `<h2>Statistik</h2>
-    <h3>Übersicht</h3><table><tr><th>Szenario</th><th class="num">Runden</th><th class="num">Bestwert</th><th class="num">Ø letzte 10</th><th class="num">Ø Genauigkeit</th></tr>${summary}</table>
+    <h3>Fortschritt</h3>
+    ${played.length ? `<div class="row" style="margin-bottom:12px">
+        ${played.map(([id, m]) => `<button data-sm="${id}" class="${id === statMode ? 'primary' : ''}" style="padding:6px 12px">${m.name}</button>`).join('')}
+        <span style="flex:1"></span>
+        <button data-metric="score" class="${statMetric === 'score' ? 'primary' : ''}" style="padding:6px 12px">Punkte</button>
+        <button data-metric="acc" class="${statMetric === 'acc' ? 'primary' : ''}" style="padding:6px 12px">Genauigkeit</button></div>
+      <div id="chart"></div><p class="muted" id="trend" style="margin-top:10px"></p>`
+      : '<p class="muted">Spiele ein paar Runden, dann siehst du hier deinen Fortschritt. Aufwärmrunden zählen nicht mit.</p>'}
+    <h3 style="margin-top:24px">Übersicht</h3><table><tr><th>Szenario</th><th class="num">Runden</th><th class="num">Bestwert</th><th class="num">Ø letzte 10</th><th class="num">Ø Genauigkeit</th></tr>${summary}</table>
     <h3 style="margin-top:24px">Letzte Runden</h3>
     <p class="muted"><small>Klicke auf eine Runde, um ihre komplette Auswertung mit Trefferbild aufzuklappen.</small></p>
     ${rows ? `<table><tr><th>Datum</th><th>Szenario</th><th class="num">Punkte</th><th class="num">Genauigkeit</th><th class="num">cm/360°</th></tr>${rows}</table>` : '<p class="muted">Noch keine Runden gespielt.</p>'}
-    <div class="row" style="margin-top:18px"><button id="sExport">Exportieren (JSON)</button><button id="sClear">Verlauf löschen</button></div>`;
+    <h3 style="margin-top:24px">Daten sichern & übertragen</h3>
+    <p class="muted"><small>Deine Daten liegen nur in diesem Browser. Mit Export/Import nimmst du Verlauf, Trefferbilder und Einstellungen
+    auf einen anderen PC oder Browser mit.</small></p>
+    <div class="row"><button id="sExport">Exportieren</button><button id="sImport">Importieren</button>
+      <input type="file" id="sFile" accept=".json,application/json" class="hidden"><button id="sClear">Verlauf löschen</button></div>
+    <p id="sMsg" class="muted" style="margin-top:8px"></p>`;
+  if (statMode) {
+    const runs = ranked(statMode).slice(-60);
+    progressChart($('chart'), runs, statMetric);
+    $('trend').textContent = trendText(runs, statMetric) + (ranked(statMode).length > 60 ? ' (Diagramm zeigt die letzten 60 Runden.)' : '');
+    el.querySelectorAll('[data-sm]').forEach((b) => (b.onclick = () => { statMode = b.dataset.sm; render(); }));
+    el.querySelectorAll('[data-metric]').forEach((b) => (b.onclick = () => { statMetric = b.dataset.metric; render(); }));
+  }
   el.querySelectorAll('tr.expand').forEach((tr) => (tr.onclick = () => {
     const open = tr.nextElementSibling?.classList.contains('detail');
     el.querySelectorAll('tr.detail').forEach((d) => d.remove());
@@ -715,7 +881,161 @@ function pageStats(el) {
       render();
     }
   };
-  $('sExport').onclick = () => download('aimforge-verlauf.json', JSON.stringify({ settings: S, history }, null, 1), 'application/json');
+  $('sExport').onclick = () => download(`aimforge-daten-${new Date().toISOString().slice(0, 10)}.json`,
+    JSON.stringify({ app: 'AimForge', version: 1, exported: Date.now(), settings: S, history, details: load(DETAIL_KEY, {}) }), 'application/json');
+  $('sImport').onclick = () => $('sFile').click();
+  $('sFile').onchange = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const msg = $('sMsg');
+    let data;
+    try { data = JSON.parse(await file.text()); } catch { msg.textContent = '⚠️ Die Datei ist keine gültige AimForge-Datei (kein JSON).'; return; }
+    if (!data || !Array.isArray(data.history)) { msg.textContent = '⚠️ In der Datei wurde kein Verlauf gefunden.'; return; }
+    const valid = data.history.map(cleanRun).filter(Boolean);
+    const known = new Set(history.map((r) => r.date));
+    const added = valid.filter((r) => !known.has(r.date));
+    history = [...history, ...added].sort((a, b) => a.date - b.date).slice(-500);
+    save('aimforge.history', history);
+    // Trefferbilder zusammenführen (vorhandene behalten), auf die neuesten begrenzen
+    if (data.details && typeof data.details === 'object') {
+      const imp = {};
+      for (const [k, v] of Object.entries(data.details)) {
+        if (/^\d+$/.test(k) && v && Array.isArray(v.s) && v.s.every((x) => Array.isArray(x) && x.length === 6 && x.every((y) => y === null || typeof y === 'number'))) {
+          imp[k] = { t: v.t ? 1 : 0, s: v.s };
+        }
+      }
+      const d = { ...imp, ...load(DETAIL_KEY, {}) };
+      const keys = Object.keys(d).sort((a, b) => a - b);
+      while (keys.length > DETAIL_MAX) delete d[keys.shift()];
+      try { localStorage.setItem(DETAIL_KEY, JSON.stringify(d)); } catch { /* Speicher voll: nur Kennzahlen importiert */ }
+    }
+    let settingsNote = '';
+    if (data.settings && typeof data.settings === 'object' && confirm('Auch die Einstellungen (Sensitivität, DPI, Kalibrierungen, Fadenkreuz …) aus der Datei übernehmen?')) {
+      for (const k of Object.keys(DEFAULTS)) {
+        const v = data.settings[k];
+        // nur Werte vom passenden Typ übernehmen; Farben nur als #rrggbb
+        if (v === undefined || typeof v !== typeof DEFAULTS[k] || Array.isArray(v) !== Array.isArray(DEFAULTS[k])) continue;
+        if (/Color$/.test(k) && !/^#[0-9a-f]{6}$/i.test(v)) continue;
+        if (k === 'myGames') { S[k] = v.filter((id) => GAMES.some((g) => g.id === id)); continue; }
+        if (k === 'calib') { S[k] = cleanCalib(v); continue; }
+        if (typeof v === 'number' && !(v > 0)) continue;
+        S[k] = v;
+      }
+      if (!yawFor(gameById(S.game))) S.game = 'cs2';
+      saveSettings();
+      settingsNote = ' Einstellungen übernommen.';
+    }
+    render();
+    $('sMsg').textContent = `✔ ${added.length} neue Runde${added.length === 1 ? '' : 'n'} importiert (${valid.length - added.length} waren schon vorhanden).${settingsNote}`;
+  };
+}
+
+// ----- Mausprüfung: Raw Input, Abfragerate, Touchpad, echte DPI -----
+function mouseCheck(onClose) {
+  const st = { phase: 'intro', moveMs: 0, lastMove: 0, peak: 0, total: 0, raw: [], dpi: [], sum: null, rawSupported: 'onpointerrawupdate' in window };
+  const STD = [125, 250, 500, 1000, 2000, 4000, 8000];
+  const onMove = (e) => {
+    if (!document.pointerLockElement) return;
+    if (st.phase === 'move') {
+      const now = e.timeStamp;
+      if (now - st.lastMove < 60) st.moveMs += now - st.lastMove;
+      st.lastMove = now;
+      st.peak = Math.max(st.peak, Math.abs(e.movementX), Math.abs(e.movementY));
+      st.total += Math.abs(e.movementX) + Math.abs(e.movementY);
+      const pct = Math.min(100, (st.moveMs / 3000) * 100);
+      const bar = $('mcBar'); if (bar) bar.style.width = pct + '%';
+      if (st.moveMs >= 3000) { st.phase = 'dpi'; draw(); }
+    } else if (st.phase === 'dpi' && st.sum !== null) {
+      st.sum += e.movementX;
+      const live = $('mcLive'); if (live) live.textContent = `${Math.abs(st.sum)} Counts`;
+    }
+  };
+  // nur echte Bewegungsereignisse zählen (keine Rand-Ereignisse beim Fangen der Maus)
+  const onRaw = (e) => { if (st.phase === 'move' && document.pointerLockElement && (e.movementX || e.movementY)) st.raw.push(e.timeStamp); };
+  const onDown = (e) => {
+    if (!document.pointerLockElement || st.phase !== 'dpi' || e.button !== 0) return;
+    if (st.sum === null) { st.sum = 0; draw(); return; }
+    const counts = Math.abs(st.sum);
+    st.sum = null;
+    if (counts > 50) st.dpi.push(counts / (10 / 2.54));
+    if (st.dpi.length >= 3) { document.exitPointerLock(); return; }
+    draw();
+  };
+  const onLock = () => {
+    if (document.pointerLockElement) return;
+    cleanup();
+    st.phase = 'result';
+    draw();
+  };
+  function cleanup() {
+    document.removeEventListener('mousemove', onMove);
+    document.removeEventListener('pointerrawupdate', onRaw);
+    document.removeEventListener('mousedown', onDown);
+    document.removeEventListener('pointerlockchange', onLock);
+  }
+  function pollingHz() {
+    // Anzahl / Zeit über zusammenhängende Bewegung: robust auch, wenn der Browser Ereignisse gebündelt ausliefert
+    let time = 0, count = 0;
+    for (let i = 1; i < st.raw.length; i++) {
+      const d = st.raw[i] - st.raw[i - 1];
+      if (d >= 0 && d < 50) { time += d; count++; }
+    }
+    if (time < 500 || count < 60) return null;
+    const hz = (count / time) * 1000;
+    return STD.reduce((best, x) => (Math.abs(Math.log(x / hz)) < Math.abs(Math.log(best / hz)) ? x : best));
+  }
+  function draw() {
+    const box = (html) => overlay(`<div style="text-align:left;max-width:440px">${html}</div>`);
+    if (st.phase === 'intro') {
+      box(`<h2>Maus prüfen</h2><p class="muted">Dauert etwa eine Minute. Lege für den zweiten Teil ein Lineal oder Maßband neben die Maus.</p>
+        <ol class="muted" style="padding-left:20px"><li>3 Sekunden die Maus zügig im Kreis bewegen</li><li>3× genau 10 cm am Lineal entlang schieben</li></ol>
+        <div class="row"><button class="primary" id="mcGo">Start</button><button id="mcCancel">Abbrechen</button></div><p class="muted" id="mcErr"></p>`);
+      $('mcGo').onclick = async () => {
+        try { await engine.lock(S.raw); } catch { $('mcErr').textContent = 'Maus konnte nicht gefangen werden – kurz warten und nochmal klicken.'; return; }
+        document.addEventListener('mousemove', onMove);
+        if (st.rawSupported) document.addEventListener('pointerrawupdate', onRaw);
+        document.addEventListener('mousedown', onDown);
+        document.addEventListener('pointerlockchange', onLock);
+        st.phase = 'move';
+        draw();
+      };
+      $('mcCancel').onclick = () => { overlay(null); onClose(); };
+    } else if (st.phase === 'move') {
+      box(`<h2>1 / 2 · Maus im Kreis bewegen</h2><p class="muted">Bewege die Maus zügig in großen Kreisen, bis der Balken voll ist.</p>
+        <div class="progress"><div id="mcBar" style="width:${Math.min(100, (st.moveMs / 3000) * 100)}%"></div></div>`);
+    } else if (st.phase === 'dpi') {
+      const n0 = st.dpi.length + 1;
+      box(`<h2>2 / 2 · DPI nachmessen (${n0} von 3)</h2>
+        <p class="muted">Setze die Maus mit der linken Kante an die 0-cm-Marke des Lineals.</p>
+        <p>${st.sum === null ? '<b>Klicke</b>, schiebe die Maus dann <b>genau 10 cm</b> nach rechts.' : 'Jetzt genau 10 cm nach rechts schieben, dann <b>nochmal klicken</b>.'}</p>
+        <p class="muted" id="mcLive">${st.sum === null ? '' : `${Math.abs(st.sum)} Counts`}</p>
+        ${st.dpi.length ? `<p class="muted">Bisher: ${st.dpi.map((d) => Math.round(d)).join(' · ')} DPI</p>` : ''}
+        <p class="muted"><small>ESC beendet die Messung vorzeitig.</small></p>`);
+    } else {
+      const hz = pollingHz();
+      const dpi = st.dpi.length ? st.dpi.reduce((a, b) => a + b, 0) / st.dpi.length : null;
+      const dev = dpi ? (dpi / S.dpi - 1) * 100 : null;
+      const spread = st.dpi.length > 1 ? (Math.max(...st.dpi) - Math.min(...st.dpi)) / dpi * 100 : 0;
+      const line = (ok, title, text) => `<div class="advice ${ok === true ? '' : ok === false ? 'warn' : 'info'}" style="margin:8px 0"><b>${title}</b><br><small>${text}</small></div>`;
+      const touch = st.total > 300 && st.peak < 6;
+      box(`<h2>Ergebnis der Mausprüfung</h2>
+        ${line(engine.rawActive !== false, 'Raw Input: ' + (engine.rawActive === false ? 'nicht verfügbar' : 'aktiv'),
+          engine.rawActive === false ? 'Dein Browser liefert die Mausbewegung mit Windows-Beschleunigung. Nutze Chrome oder Edge, oder schalte „Zeigerbeschleunigung verbessern“ aus und stelle die Zeigergeschwindigkeit auf 6/11.' : 'Die Mausbeschleunigung des Betriebssystems wird umgangen – genau wie in Spielen.')}
+        ${line(hz ? hz >= 500 : null, 'Abfragerate: ' + (hz ? `≈ ${hz} Hz` : 'nicht messbar'),
+          hz ? (hz >= 500 ? 'Gut für Shooter.' : 'Für Shooter sind mindestens 500 Hz, besser 1000 Hz empfehlenswert – einstellbar in der Maus-Software.') : 'Konnte nicht gemessen werden. Das geht nur in Chrome oder Edge und braucht die vollen 3 Sekunden Bewegung – ggf. „Nochmal prüfen“.')}
+        ${line(!touch, 'Eingabegerät: ' + (touch ? 'sieht nach Touchpad aus' : 'Maus'), touch ? 'Für Aim-Training und die Sensitivitätsmessung bitte eine externe Maus verwenden.' : 'Die Bewegungen sehen nach einer normalen Maus aus.')}
+        ${dpi ? line(Math.abs(dev) <= 3, `DPI: gemessen ≈ ${Math.round(dpi)} (eingetragen ${S.dpi})`,
+          `Abweichung ${dev >= 0 ? '+' : ''}${n(dev, 1)} %${spread > 4 ? ` · Die ${st.dpi.length} Messungen streuen um ${n(spread, 0)} % – lieber nochmal genauer messen.` : ''}. ` +
+          (Math.abs(dev) > 3 ? 'Die echte DPI wirkt sich nur auf die cm-Angaben, den 360°-Test und die Kalibrierung aus – die Werte, die du in Spielen einträgst, bleiben gleich.' : 'Passt – deine DPI-Angabe stimmt.'))
+          : line(null, 'DPI: nicht gemessen', 'Für die DPI-Messung alle drei 10-cm-Strecken durchführen.')}
+        <div class="row" style="margin-top:12px">${dpi && Math.abs(dev) > 3 ? `<button class="primary" id="mcApply">${Math.round(dpi)} DPI übernehmen</button>` : ''}
+          <button id="mcAgain">Nochmal prüfen</button><button id="mcClose">Schließen</button></div>`);
+      if ($('mcApply')) $('mcApply').onclick = () => { S.dpi = Math.round(dpi); saveSettings(); overlay(null); onClose(); };
+      $('mcAgain').onclick = () => mouseCheck(onClose);
+      $('mcClose').onclick = () => { overlay(null); onClose(); };
+    }
+  }
+  draw();
 }
 
 // ----- Einstellungen (nur Darstellung, Eingabe, Ton) -----
@@ -731,6 +1051,9 @@ function pageSettings(el) {
       <div><label>Fadenkreuz-Farbe</label><input id="sXhColor" type="color" value="${S.xhColor}" style="height:38px"></div>
       <div><label>Zielfarbe</label><input id="sTColor" type="color" value="${S.targetColor}" style="height:38px"></div>
     </div></div>
+    <div class="card" style="margin-top:14px"><h3>Maus prüfen</h3>
+      <p class="muted">Prüft Raw Input, Abfragerate und Eingabegerät und misst mit einem Lineal die echte DPI deiner Maus.</p>
+      <button class="primary" id="sCheck">Mausprüfung starten</button></div>
     <div class="card" style="margin-top:14px"><h3>Eingabe & Ton</h3>
       <label style="color:var(--text)"><input type="checkbox" id="sRaw" style="width:auto" ${S.raw ? 'checked' : ''}> Raw Input (umgeht die Mausbeschleunigung des Betriebssystems, empfohlen)</label>
       <label style="color:var(--text)"><input type="checkbox" id="sSound" style="width:auto" ${S.sound ? 'checked' : ''}> Trefferton</label>
@@ -738,6 +1061,7 @@ function pageSettings(el) {
       Ohne Raw Input sollte die Windows-Zeigergeschwindigkeit auf 6/11 stehen und „Zeigerbeschleunigung verbessern“ aus sein.</small></p></div>`;
   const num = (id, k) => ($(id).oninput = (e) => { const v = parseFloat(e.target.value); if (v > 0) { S[k] = v; saveSettings(); } });
   num('sFov', 'fov'); num('sXhSize', 'xhSize');
+  $('sCheck').onclick = () => mouseCheck(render);
   $('sXh').onchange = (e) => { S.xhStyle = e.target.value; saveSettings(); };
   $('sXhColor').oninput = (e) => { S.xhColor = e.target.value; saveSettings(); };
   $('sTColor').oninput = (e) => { S.targetColor = e.target.value; saveSettings(); };
