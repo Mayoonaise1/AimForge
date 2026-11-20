@@ -37,6 +37,33 @@ const curYaw = () => yawFor(gameById(S.game));
 const curCm = () => cm360From(S.sens, curYaw(), S.dpi);
 const shortName = (g) => g.name.split(' (')[0];
 
+// ---------- Einzelschüsse (Trefferbild) der letzten Runden ----------
+// Kompakt als ganze Zahlen (Tausendstel Grad) gespeichert, damit der Browser-Speicher (~5 MB) reicht.
+const DETAIL_KEY = 'aimforge.details', DETAIL_MAX = 60;
+const q = (v) => (v === null || v === undefined ? null : Math.round(v * 1000));
+const uq = (v) => (v === null ? null : v / 1000);
+function saveDetails(date, log) {
+  if (!log || !log.length) return;
+  const track = !!log[0].track;
+  const list = track ? log.filter((_, i) => i % 2 === 0) : log; // Tracking: 100-ms-Raster reicht für die Grafik
+  const d = load(DETAIL_KEY, {});
+  d[date] = { t: track ? 1 : 0, s: list.map((x) => [q(x.dx), q(x.dy), q(x.r), x.hit ? 1 : 0, q(x.ux), q(x.uy)]) };
+  const keys = Object.keys(d).sort((a, b) => a - b);
+  while (keys.length > DETAIL_MAX) delete d[keys.shift()];
+  // Speicher voll -> älteste Trefferbilder opfern, bis es passt
+  for (;;) {
+    try { localStorage.setItem(DETAIL_KEY, JSON.stringify(d)); return; } catch {
+      if (keys.length <= 1) return;
+      delete d[keys.shift()];
+    }
+  }
+}
+function loadDetails(date) {
+  const e = load(DETAIL_KEY, {})[date];
+  if (!e) return null;
+  return e.s.map(([dx, dy, r, hit, ux, uy]) => ({ dx: dx / 1000, dy: dy / 1000, r: r / 1000, hit: !!hit, ux: uq(ux), uy: uq(uy), track: !!e.t }));
+}
+
 // ---------- Helfer ----------
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -176,6 +203,7 @@ function finish() {
   if (!p.opts.noHistory) {
     const { shotLog, ...stored } = res; // Einzelschüsse nur für die Ergebnisseite, nicht im Verlauf speichern
     history.push(stored);
+    saveDetails(res.date, shotLog);
     if (history.length > 500) history = history.slice(-500);
     save('aimforge.history', history);
   }
@@ -255,19 +283,26 @@ function showResults(r) {
   const el = $('page');
   const prev = history.filter((h) => h.mode === r.mode && h.date !== r.date);
   const best = prev.length ? Math.max(...prev.map((h) => h.score)) : null;
-  const a = r.onTarget === undefined ? biasAdvice(r) : null;
   const prevScore = best;
   el.innerHTML = `<h2>Ergebnis – ${MODES[r.mode].name}</h2>
     ${prevScore !== null ? `<p class="muted">${r.score > prevScore ? '🏆 Neuer Bestwert!' : `Bestwert: ${prevScore}`}</p>` : ''}
-    <div class="stats">${resultStats(r)}</div>
-    ${shotSection(r)}
-    ${a ? `<h3>Bewegungsanalyse</h3>${adviceBox(a)}
-      <p class="muted"><small>„Erste Bewegung erreicht“: Wie weit dein schneller Anfangs-Flick in Richtung Ziel kommt, bevor du abbremst.
-      Leicht unter 100 % ist ideal – darüber überschießt du, weit darunter brauchst du viele Korrekturen.</small></p>` : ''}
+    <div id="resultBody"></div>
+    <p class="muted"><small>Diese Auswertung findest du später unter „Statistik“ wieder.</small></p>
     <div class="row"><button class="primary" id="again">Nochmal</button><button id="back">Zurück</button></div>`;
+  showResultBody($('resultBody'), r);
   $('again').onclick = () => play(r.mode);
   $('back').onclick = render;
-  bindShotSection(r);
+}
+
+/** Kennzahlen, Trefferbild und Bewegungsanalyse einer Runde in einen Container zeichnen */
+function showResultBody(box, r) {
+  const a = r.onTarget === undefined ? biasAdvice(r) : null;
+  box.innerHTML = `<div class="stats">${resultStats(r)}</div>
+    ${r.shotLog ? shotSection(r) : '<p class="muted"><small>Kein Trefferbild gespeichert – es wird nur für die letzten ' + DETAIL_MAX + ' Runden aufbewahrt.</small></p>'}
+    ${a ? `<h3>Bewegungsanalyse</h3>${adviceBox(a)}
+      <p class="muted"><small>„Erste Bewegung erreicht“: Wie weit dein schneller Anfangs-Flick in Richtung Ziel kommt, bevor du abbremst.
+      Leicht unter 100 % ist ideal – darüber überschießt du, weit darunter brauchst du viele Korrekturen.</small></p>` : ''}`;
+  if (r.shotLog) bindShotSection(box, r);
 }
 
 // ----- Trefferbild -----
@@ -336,19 +371,19 @@ function shotSection(r) {
   return `<h3 style="margin-top:8px">Trefferbild</h3>
     <div style="display:grid;grid-template-columns:minmax(260px,340px) 1fr;gap:20px;align-items:start" class="shotgrid">
       <div><div class="row" style="margin-bottom:10px">
-          <button id="vDir" class="primary" style="padding:5px 12px">Bewegungsrichtung</button>
-          <button id="vScreen" style="padding:5px 12px">Bildschirm</button></div>
-        <div id="diagram"></div>
+          <button data-v="dir" class="primary" style="padding:5px 12px">Bewegungsrichtung</button>
+          <button data-v="screen" style="padding:5px 12px">Bildschirm</button></div>
+        <div data-diagram></div>
         <p class="muted" style="font-size:12px;margin-top:8px">${legend} · <span style="color:var(--warn)">+</span> Mittelpunkt deiner Schüsse.
           Der rote Kreis ist das Ziel, alle Ziele sind auf dieselbe Größe skaliert.</p></div>
-      <div><p class="muted" id="viewInfo" style="margin-top:0"></p>
+      <div><p class="muted" data-viewinfo style="margin-top:0"></p>
         <div class="stats" style="margin-top:0;grid-template-columns:repeat(auto-fill,minmax(170px,1fr))">${figures}</div>
         ${shotAdvice(st).map(adviceBox).join('')}</div>
     </div>`;
 }
 
-function bindShotSection(r) {
-  if (!$('diagram')) return;
+function bindShotSection(box, r) {
+  if (!box.querySelector('[data-diagram]')) return;
   const track = r.shotLog[0]?.track;
   const info = {
     dir: track
@@ -357,13 +392,11 @@ function bindShotSection(r) {
     screen: 'So, wie du es auf dem Bildschirm gesehen hast: oben, unten, links, rechts.',
   };
   const show = (v) => {
-    $('diagram').innerHTML = targetDiagram(r.shotLog, v);
-    $('viewInfo').textContent = info[v];
-    $('vDir').className = v === 'dir' ? 'primary' : '';
-    $('vScreen').className = v === 'screen' ? 'primary' : '';
+    box.querySelector('[data-diagram]').innerHTML = targetDiagram(r.shotLog, v);
+    box.querySelector('[data-viewinfo]').textContent = info[v];
+    box.querySelectorAll('[data-v]').forEach((b) => { b.className = b.dataset.v === v ? 'primary' : ''; });
   };
-  $('vDir').onclick = () => show('dir');
-  $('vScreen').onclick = () => show('screen');
+  box.querySelectorAll('[data-v]').forEach((b) => (b.onclick = () => show(b.dataset.v)));
   show('dir');
 }
 
@@ -651,14 +684,37 @@ function pageStats(el) {
   const rows = history.slice(-40).reverse().map((r) => {
     const d = new Date(r.date).toLocaleString('de-DE', { dateStyle: 'short', timeStyle: 'short' });
     if (r.mode === 'finderResult') return `<tr><td>${d}</td><td>Sens-Finder</td><td class="num" colspan="2">Ergebnis übernommen</td><td class="num">${n(r.cm360, 1)}</td></tr>`;
-    return `<tr><td>${d}</td><td>${MODES[r.mode]?.name ?? r.mode}</td><td class="num">${r.score}</td><td class="num">${n(r.acc, 1)} %</td><td class="num">${n(r.cm360, 1)}</td></tr>`;
+    return `<tr class="expand" data-date="${r.date}"><td><span class="arrow">▸</span> ${d}</td><td>${MODES[r.mode]?.name ?? r.mode}</td><td class="num">${r.score}</td><td class="num">${n(r.acc, 1)} %</td><td class="num">${n(r.cm360, 1)}</td></tr>`;
   }).join('');
   el.innerHTML = `<h2>Statistik</h2>
     <h3>Übersicht</h3><table><tr><th>Szenario</th><th class="num">Runden</th><th class="num">Bestwert</th><th class="num">Ø letzte 10</th><th class="num">Ø Genauigkeit</th></tr>${summary}</table>
     <h3 style="margin-top:24px">Letzte Runden</h3>
+    <p class="muted"><small>Klicke auf eine Runde, um ihre komplette Auswertung mit Trefferbild aufzuklappen.</small></p>
     ${rows ? `<table><tr><th>Datum</th><th>Szenario</th><th class="num">Punkte</th><th class="num">Genauigkeit</th><th class="num">cm/360°</th></tr>${rows}</table>` : '<p class="muted">Noch keine Runden gespielt.</p>'}
     <div class="row" style="margin-top:18px"><button id="sExport">Exportieren (JSON)</button><button id="sClear">Verlauf löschen</button></div>`;
-  $('sClear').onclick = () => { if (confirm('Gesamten Verlauf löschen?')) { history = []; save('aimforge.history', history); render(); } };
+  el.querySelectorAll('tr.expand').forEach((tr) => (tr.onclick = () => {
+    const open = tr.nextElementSibling?.classList.contains('detail');
+    el.querySelectorAll('tr.detail').forEach((d) => d.remove());
+    el.querySelectorAll('tr.expand').forEach((x) => { x.classList.remove('open'); x.querySelector('.arrow').textContent = '▸'; });
+    if (open) return; // zweiter Klick klappt wieder zu
+    const date = +tr.dataset.date;
+    const r = { ...history.find((h) => h.date === date) };
+    r.shotLog = loadDetails(date);
+    const row = document.createElement('tr');
+    row.className = 'detail';
+    row.innerHTML = `<td colspan="5"><div class="detailbox"></div></td>`;
+    tr.after(row);
+    tr.classList.add('open');
+    tr.querySelector('.arrow').textContent = '▾';
+    showResultBody(row.querySelector('.detailbox'), r);
+  }));
+  $('sClear').onclick = () => {
+    if (confirm('Gesamten Verlauf löschen?')) {
+      history = []; save('aimforge.history', history);
+      try { localStorage.removeItem(DETAIL_KEY); } catch { /* egal */ }
+      render();
+    }
+  };
   $('sExport').onclick = () => download('aimforge-verlauf.json', JSON.stringify({ settings: S, history }, null, 1), 'application/json');
 }
 

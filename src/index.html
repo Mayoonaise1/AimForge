@@ -64,6 +64,11 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .progress { height: 6px; background: var(--panel2); border-radius: 4px; overflow: hidden; margin: 10px 0 18px; }
 .progress div { height: 100%; background: var(--accent); }
 
+tr.expand { cursor: pointer; }
+tr.expand:hover td, tr.expand.open td { background: var(--panel2); }
+tr.expand .arrow { color: var(--accent); display: inline-block; width: 12px; }
+tr.detail > td { background: var(--panel); padding: 4px 18px 18px; }
+.detailbox h3 { margin-top: 14px; }
 #overlay { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
   background: rgba(10,12,16,.55); text-align: center; }
 #overlay .box { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 28px 36px; max-width: 460px; }

@@ -15,7 +15,8 @@ Browser-basierter Aim-Trainer (Three.js). Die fertige App ist **eine einzige Dat
   inkl. Rundung des Spielmenüs, DPI-Tipp, Konsolenbefehlen und Spickzettel-Export
 - **Kalibrierung per 360°-Test**: Für Spiele ohne verlässlichen Umrechnungswert (z. B. Battlefield 6, Wardogs)
   einmal mit dem Lineal nachmessen – das Tool lernt daraus die Umrechnung des Spiels
-- **Statistik**: Bestwerte, Durchschnitt, Verlauf (gespeichert im Browser), JSON-Export
+- **Statistik**: Bestwerte, Durchschnitt, Verlauf (gespeichert im Browser), JSON-Export;
+  jede Runde aufklappbar mit kompletter Auswertung, Trefferbild für die letzten 60 Runden
 - Raw Input (ohne OS-Mausbeschleunigung), einstellbares FOV und Fadenkreuz
 
 ## Entwickeln
