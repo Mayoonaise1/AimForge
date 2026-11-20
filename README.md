@@ -8,7 +8,11 @@ Browser-basierter Aim-Trainer (Three.js). Die fertige App ist **eine einzige Dat
 - **Bewegungsanalyse** nach jeder Runde: Reaktionszeit, Überschießen/Unterschießen, Korrekturzeit
 - **Sensitivitäts-Finder**: Blindtests im Paarvergleich, der Bereich wird pro Runde enger,
   danach Feinjustierung anhand deines Bewegungsmusters
-- **Umrechner**: cm/360° ↔ CS2, Valorant, Apex, Overwatch 2, CoD, Fortnite, TF2, Quake, Titanfall 2, eigener Yaw-Wert
+- **Sensitivität**: dein Wert als cm/360° und welcher Wert in welchem Spiel einzutragen ist
+  (CS2, Valorant, Apex, Overwatch 2, CoD, Fortnite, Battlefield 6, Wardogs, TF2, Quake, Titanfall 2, eigenes Spiel),
+  inkl. Rundung des Spielmenüs, DPI-Tipp, Konsolenbefehlen und Spickzettel-Export
+- **Kalibrierung per 360°-Test**: Für Spiele ohne verlässlichen Umrechnungswert (z. B. Battlefield 6, Wardogs)
+  einmal mit dem Lineal nachmessen – das Tool lernt daraus die Umrechnung des Spiels
 - **Statistik**: Bestwerte, Durchschnitt, Verlauf (gespeichert im Browser), JSON-Export
 - Raw Input (ohne OS-Mausbeschleunigung), einstellbares FOV und Fadenkreuz
 

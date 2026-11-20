@@ -2,22 +2,40 @@ import { Engine } from './engine.js';
 import { Session, MODES } from './session.js';
 import { SensFinder } from './finder.js';
 import { biasAdvice } from './analysis.js';
-import { GAMES, gameById, yawOf, cm360From, sensFrom, fmtSens } from './games.js';
+import { GAMES, gameById, cm360From, sensFrom, settingFor, yawFromMeasurement, fmtSens } from './games.js';
 
 // ---------- Speicher ----------
 const DEFAULTS = {
-  dpi: 800, game: 'cs2', sens: 1.25, customYaw: 0.022, fov: 103, raw: true, sound: true,
+  dpi: 800, game: 'cs2', sens: 1.25, fov: 103, raw: true, sound: true,
   xhStyle: 'cross', xhColor: '#4fd1a5', xhSize: 7, targetColor: '#ff4d5e',
   finderDuration: 30, finderRounds: 6,
+  myGames: ['cs2', 'valorant', 'apex', 'ow2', 'cod', 'fortnite', 'bf6', 'wardogs'],
+  calib: {}, // gameId -> { yaw, sens, cm, dpi, date } aus dem 360°-Test
 };
 const load = (k, d) => { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch { return d; } };
 const save = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch { /* egal */ } };
 const S = { ...DEFAULTS, ...load('aimforge.settings', {}) };
+// Übernahme aus Version 1: eigener Yaw-Wert -> Kalibrierung von „Eigenes Spiel“
+if (S.customYaw && !S.calib.custom) S.calib.custom = { yaw: S.customYaw };
+delete S.customYaw;
 let history = load('aimforge.history', []);
 const saveSettings = () => { save('aimforge.settings', S); updateSensbox(); };
 
-const curYaw = () => yawOf(gameById(S.game), S.customYaw);
+/** Umrechnungswert eines Spiels: eigene Messung > Standardwert > Schätzung */
+const yawFor = (g) => S.calib[g.id]?.yaw ?? g.yaw ?? g.estimate ?? null;
+function yawStatus(g) {
+  const c = S.calib[g.id];
+  if (c?.yaw) return { kind: 'ok', text: c.date ? `von dir gemessen am ${new Date(c.date).toLocaleDateString('de-DE')}` : 'eigener Wert' };
+  if (g.yaw && g.verified === false) return { kind: 'warn', text: 'Community-Wert – einmal per 360°-Test prüfen' };
+  if (g.yaw) return { kind: 'ok', text: 'bekannter Standardwert des Spiels' };
+  if (g.estimate) return { kind: 'warn', text: 'nur geschätzt – bitte kalibrieren' };
+  return { kind: 'missing', text: 'noch nicht kalibriert' };
+}
+// Referenzspiel ohne Umrechnungswert -> auf CS2 zurückfallen
+if (!yawFor(gameById(S.game))) S.game = 'cs2';
+const curYaw = () => yawFor(gameById(S.game));
 const curCm = () => cm360From(S.sens, curYaw(), S.dpi);
+const shortName = (g) => g.name.split(' (')[0];
 
 // ---------- Helfer ----------
 const $ = (id) => document.getElementById(id);
@@ -26,7 +44,13 @@ const n = (v, d = 1) => (isFinite(v) ? v.toFixed(d).replace('.', ',') : '–');
 const pct = (v) => (isFinite(v) ? Math.round(v * 100) + ' %' : '–');
 const ms = (v) => (isFinite(v) ? Math.round(v) + ' ms' : '–');
 const stat = (label, value) => `<div class="stat"><b>${value}</b><span>${label}</span></div>`;
-const gameOptions = (sel) => GAMES.map((g) => `<option value="${g.id}" ${g.id === sel ? 'selected' : ''}>${esc(g.name)}</option>`).join('');
+const parseNum = (v) => parseFloat(String(v).replace(',', '.'));
+function download(name, text, type) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([text], { type }));
+  a.download = name;
+  a.click();
+}
 
 // ---------- Engine & Sound ----------
 const engine = new Engine($('game'));
@@ -70,7 +94,7 @@ function overlay(html) {
   if (html) $('overlayBox').innerHTML = html;
 }
 
-/** Startet eine Runde. opts: { cm360, duration, title, onDone(result), onAbort() } */
+/** Startet eine Runde. opts: { cm360, duration, title, noHistory, onDone(result), onAbort() } */
 function play(modeId, opts = {}) {
   const cm = opts.cm360 ?? curCm();
   engine.setSensitivity(cm, S.dpi);
@@ -139,8 +163,6 @@ function abort() {
   engine.unlock();
   showMenu(true);
   if (p?.opts.onAbort) p.opts.onAbort(); else render();
-// Debug-Zugriff für Tests in der Browser-Konsole
-window.aimforge = { engine, get session() { return session; } };
 }
 
 function finish() {
@@ -171,8 +193,6 @@ function loop(now) {
       $('hudAcc').textContent = Math.round(l.acc) + ' %';
     }
     engine.render();
-// Debug-Zugriff für Tests in der Browser-Konsole
-window.aimforge = { engine, get session() { return session; } };
   }
   requestAnimationFrame(loop);
 }
@@ -187,14 +207,13 @@ document.querySelectorAll('nav button').forEach((b) => {
 function render() {
   document.querySelectorAll('nav button').forEach((b) => b.classList.toggle('active', b.dataset.page === page));
   const el = $('page');
-  ({ train: pageTrain, finder: pageFinder, convert: pageConvert, stats: pageStats, settings: pageSettings })[page](el);
+  ({ train: pageTrain, sens: pageSens, finder: pageFinder, stats: pageStats, settings: pageSettings })[page](el);
   updateSensbox();
 }
 
 function updateSensbox() {
-  const g = gameById(S.game);
   $('sensbox').innerHTML = `<div class="muted">Aktuell</div><b>${n(curCm(), 1)} cm/360°</b><br>
-    <small>${esc(g.name.split(' (')[0])}: ${fmtSens(S.sens)} @ ${S.dpi} DPI</small>`;
+    <small>${esc(shortName(gameById(S.game)))}: ${fmtSens(S.sens)} @ ${S.dpi} DPI</small>`;
 }
 
 function bestOf(mode) {
@@ -209,8 +228,8 @@ function pageTrain(el) {
       <small>${m.duration} s · ${m.type === 'track' ? 'Tracking' : 'Klicken'}</small>
       ${best !== null ? `<div class="best">Bestwert: ${best}</div>` : ''}</div>`;
   }).join('');
-  el.innerHTML = `<h2>Training</h2><p class="muted">Wähle ein Szenario. Gespielt wird mit deiner aktuellen Sensitivität
-    (${n(curCm(), 1)} cm/360°) und ${n(S.fov, 1)}° FOV – beides unter Einstellungen.</p><div class="cards">${cards}</div>
+  el.innerHTML = `<h2>Training</h2><p class="muted">Wähle ein Szenario. Gespielt wird mit deiner Sensitivität
+    (${n(curCm(), 1)} cm/360°, Seite „Sensitivität“) und ${n(S.fov, 1)}° FOV (Einstellungen).</p><div class="cards">${cards}</div>
     <div class="card" style="margin-top:20px"><h3>Tipps für genaue Messwerte</h3>
     <p class="muted">Nutze Chrome oder Edge (Raw Input wird dort unterstützt). Schalte im Betriebssystem die Mausbeschleunigung
     („Zeigerbeschleunigung verbessern“) aus. Spiele im Vollbild (F11), damit nichts ablenkt.</p></div>`;
@@ -247,6 +266,166 @@ function showResults(r) {
   $('back').onclick = render;
 }
 
+// ----- Sensitivität (eigener Wert, Werte pro Spiel, Kalibrierung, Export) -----
+function cheatSheet(cm) {
+  const lines = [`AimForge – Sensitivitäts-Profil (${new Date().toLocaleDateString('de-DE')})`,
+    `Ziel: ${n(cm, 2)} cm/360° bei ${S.dpi} DPI (Hipfire)`, ''];
+  for (const id of S.myGames) {
+    const g = gameById(id), yaw = yawFor(g);
+    if (!yaw) { lines.push(`${g.name}: noch nicht kalibriert`); continue; }
+    const st = settingFor(g, yaw, cm, S.dpi);
+    lines.push(`${g.name}: ${st.text}` + (g.cmd ? `   (Konsole: ${g.cmd.replace('{s}', st.text)})` : '') +
+      `   -> ${n(st.actualCm, 2)} cm/360° (${st.deviation >= 0 ? '+' : ''}${n(st.deviation, 2)} %)` +
+      (yawStatus(g).kind === 'warn' ? '   [ungeprüft]' : ''));
+    if (g.where) lines.push(`   Einstellen: ${g.where}`);
+  }
+  lines.push('', 'Überall: Mausbeschleunigung aus, Raw Input an (falls vorhanden), Maus-DPI nicht ändern.',
+    `360°-Test: Maus ${n(cm, 1)} cm am Lineal entlang bewegen = genau eine volle Drehung.`);
+  return lines.join('\n');
+}
+
+function gameCard(g, cm) {
+  const yaw = yawFor(g), status = yawStatus(g), c = S.calib[g.id];
+  const color = status.kind === 'ok' ? 'var(--accent)' : 'var(--warn)';
+  let body;
+  if (yaw) {
+    const st = settingFor(g, yaw, cm, S.dpi);
+    const dev = Math.abs(st.deviation);
+    const cmd = g.cmd ? g.cmd.replace('{s}', st.text) : null;
+    body = `<label>Eintragen</label><div class="big">${st.text}</div>
+      ${cmd ? `<div class="row" style="margin:6px 0"><code style="background:var(--bg);padding:4px 8px;border-radius:6px">${esc(cmd)}</code>
+        <button data-copy="${esc(cmd)}" style="padding:4px 10px">Kopieren</button></div>` : ''}
+      <p style="color:${dev > 1 ? 'var(--warn)' : 'var(--muted)'};font-size:13px;margin-top:6px">Ergibt ${n(st.actualCm, 2)} cm/360° · Abweichung ${st.deviation >= 0 ? '+' : ''}${n(st.deviation, 2)} %
+        ${dev > 1 ? '<br>Das Spiel erlaubt nicht genauer – siehe DPI-Tipp oben.' : ''}</p>`;
+  } else {
+    body = `<p class="muted">Für dieses Spiel gibt es keinen verlässlichen Umrechnungswert. Miss einmal per 360°-Test nach (unten) –
+      danach steht hier der passende Wert.</p>`;
+  }
+  return `<div class="card" data-card="${g.id}"><h3>${esc(g.name)}</h3>
+    <p style="font-size:12px;color:${color};margin:-6px 0 10px">● ${esc(status.text)}</p>
+    ${body}
+    ${g.where ? `<p class="muted"><small>${esc(g.where)}</small></p>` : ''}
+    ${g.notes ? `<p class="muted"><small>${esc(g.notes)}</small></p>` : ''}
+    <details ${yaw ? '' : 'open'}><summary style="cursor:pointer;color:var(--accent);font-size:13px">${c ? 'Neu messen' : 'Kalibrieren (360°-Test)'}</summary>
+      <div class="grid2" style="margin-top:10px;grid-template-columns:1fr 1fr">
+        <div><label>Im Spiel eingestellt</label><input data-cal-sens type="text" inputmode="decimal" value="${c?.sens ?? (yaw ? settingFor(g, yaw, cm, S.dpi).text : '')}"></div>
+        <div><label>Gemessen: cm für 360°</label><input data-cal-cm type="text" inputmode="decimal" placeholder="z. B. 38,5"></div>
+      </div>
+      <div class="row" style="margin-top:8px"><button data-cal-save style="padding:5px 12px">Messung speichern</button>
+        ${c ? '<button data-cal-reset style="padding:5px 12px">Messung löschen</button>' : ''}</div>
+      <p class="muted" data-cal-msg style="font-size:12px;margin-top:6px">Mit ${S.dpi} DPI messen. Danach den neuen Wert eintragen und noch einmal messen –
+      passt es, bist du fertig, sonst die neue Messung speichern.</p>
+    </details></div>`;
+}
+
+function pageSens(el) {
+  const options = GAMES.map((g) => {
+    const ok = !!yawFor(g);
+    return `<option value="${g.id}" ${g.id === S.game ? 'selected' : ''} ${ok ? '' : 'disabled'}>${esc(g.name)}${ok ? '' : ' (erst kalibrieren)'}</option>`;
+  }).join('');
+  const chips = GAMES.map((g) => `<label style="display:inline-flex;gap:6px;align-items:center;color:var(--text);margin:0 14px 8px 0">
+      <input type="checkbox" data-g="${g.id}" style="width:auto" ${S.myGames.includes(g.id) ? 'checked' : ''}>${esc(shortName(g))}</label>`).join('');
+  el.innerHTML = `<h2>Sensitivität</h2>
+    <p class="muted">Deine Sensitivität wird als <b>cm/360°</b> gespeichert: so viele Zentimeter Mausweg ergeben eine volle Drehung.
+    Das ist in jedem Spiel gleich messbar. Unten steht, welchen Wert du in welchem Spiel einträgst, damit es sich überall gleich anfühlt.</p>
+    <div class="grid2">
+      <div class="card"><h3>Dein Wert</h3>
+        <div class="grid2" style="grid-template-columns:1fr 1fr">
+          <div style="grid-column:1/-1"><label>Ausgehend von Spiel</label><select id="sGame">${options}</select></div>
+          <div><label>Sensitivität dort</label><input id="sSens" type="text" inputmode="decimal" value="${S.sens}"></div>
+          <div><label>Maus-DPI</label><input id="sDpi" type="text" inputmode="numeric" value="${S.dpi}"></div>
+        </div>
+        <div class="big" id="sValue" style="margin-top:12px"></div><small id="sValueSub"></small></div>
+      <div class="card"><h3>Einmal pro Spiel prüfen</h3><p class="muted" style="margin:0"><small>
+        ✔ Mausbeschleunigung im Spiel aus<br>✔ „Raw Input“ an, falls es die Option gibt<br>
+        ✔ Windows: „Zeigerbeschleunigung verbessern“ aus<br>✔ Maus-DPI überall gleich lassen<br>
+        ✔ Werte gelten für normales Zielen (Hipfire), nicht für Visier/Scope<br>
+        ✔ Der Sens-Finder setzt diesen Wert automatisch</small></p></div>
+    </div>
+    <h3 style="margin-top:20px">Deine Spiele</h3><div>${chips}</div>
+    <div id="sTip"></div>
+    <div class="cards" id="sCards" style="margin-top:10px"></div>
+    <div class="card" style="margin-top:20px"><h3>360°-Test: so misst du im Spiel</h3>
+      <ol class="muted" style="margin:0 0 10px;padding-left:20px">
+        <li>Lineal oder Maßband neben das Mauspad legen.</li>
+        <li>Im Spiel (Schießstand/Training) das Fadenkreuz auf eine markante Kante richten.</li>
+        <li>Maus an die 0-cm-Marke setzen und <b>langsam</b> zur Seite schieben, bis das Fadenkreuz nach einer vollen Drehung wieder genau auf der Kante steht.</li>
+        <li>Die zurückgelegten Zentimeter ablesen. Zum Prüfen sollten es <b id="sTestCm"></b> sein – zum Kalibrieren trägst du den gemessenen Wert in der Karte des Spiels ein.</li>
+      </ol>
+      <p class="muted"><small>Langsam bewegen, damit eine eventuell noch aktive Beschleunigung das Ergebnis nicht verfälscht. Bei größeren Strecken
+      die Maus anheben und an der letzten Marke wieder ansetzen. Zwei Messungen mitteln macht das Ergebnis genauer.</small></p></div>
+    <div class="row" style="margin-top:16px"><button class="primary" id="pCopy">Spickzettel kopieren</button><button id="pSave">Als Textdatei speichern</button></div>`;
+
+  const copy = (text, btn) => navigator.clipboard?.writeText(text).then(() => { const o = btn.textContent; btn.textContent = 'Kopiert ✓'; setTimeout(() => (btn.textContent = o), 1200); });
+
+  const draw = () => {
+    const cm = curCm();
+    $('sValue').textContent = `${n(cm, 1)} cm/360°`;
+    $('sValueSub').textContent = `eDPI ${Math.round(S.sens * S.dpi)} · ${n(cm / 2.54, 2)} inch/360°`;
+    $('sTestCm').textContent = `${n(cm, 1)} cm`;
+    const mine = S.myGames.map(gameById);
+    // DPI-Tipp: mit welcher gängigen DPI runden die gewählten Spiele am saubersten?
+    const worst = (dpi) => Math.max(0, ...mine.filter(yawFor).map((g) => Math.abs(settingFor(g, yawFor(g), cm, dpi).deviation)));
+    const cur = worst(S.dpi);
+    const better = [400, 800, 1000, 1200, 1600, 3200].filter((d) => d !== S.dpi).map((d) => ({ d, w: worst(d) })).sort((a, b) => a.w - b.w)[0];
+    $('sTip').innerHTML = cur > 1 && better && better.w < cur / 2
+      ? `<div class="advice warn">Bei ${S.dpi} DPI weicht ein Spiel durch die Rundung im Spielmenü um bis zu ${n(cur, 1)} % ab. Mit <b>${better.d} DPI</b> wären es nur ${n(better.w, 2)} %.
+         <div class="row" style="margin-top:8px"><button id="sDpiSwitch" style="padding:5px 12px">Auf ${better.d} DPI umstellen</button>
+         <small>Behält deine ${n(cm, 1)} cm/360° und rechnet alle Werte neu. Danach die DPI auch in der Maus-Software ändern.</small></div></div>` : '';
+    if ($('sDpiSwitch')) $('sDpiSwitch').onclick = () => {
+      S.sens = +sensFrom(cm, curYaw(), better.d).toFixed(4);
+      S.dpi = better.d;
+      saveSettings(); render();
+    };
+    $('sCards').innerHTML = mine.map((g) => gameCard(g, cm)).join('') || '<p class="muted">Wähle oben mindestens ein Spiel aus.</p>';
+    $('sCards').querySelectorAll('[data-copy]').forEach((b) => (b.onclick = () => copy(b.dataset.copy, b)));
+    $('sCards').querySelectorAll('[data-card]').forEach((card) => {
+      const id = card.dataset.card, g = gameById(id);
+      const msg = card.querySelector('[data-cal-msg]');
+      card.querySelector('[data-cal-save]').onclick = () => {
+        const sens = parseNum(card.querySelector('[data-cal-sens]').value);
+        const measured = parseNum(card.querySelector('[data-cal-cm]').value);
+        if (!(sens > 0) || !(measured > 0)) { msg.textContent = 'Bitte beide Werte als Zahl eintragen.'; return; }
+        const yaw = yawFromMeasurement(sens, measured, S.dpi);
+        const old = yawFor(g);
+        if (old && (yaw / old > 3 || yaw / old < 1 / 3)) {
+          msg.textContent = `Die Messung weicht mehr als das Dreifache vom bisherigen Wert ab – bitte DPI, eingestellten Wert und Messung prüfen.`;
+          return;
+        }
+        S.calib[id] = { yaw, sens, cm: measured, dpi: S.dpi, date: Date.now() };
+        saveSettings();
+        draw();
+      };
+      const reset = card.querySelector('[data-cal-reset]');
+      if (reset) reset.onclick = () => {
+        delete S.calib[id];
+        if (S.game === id && !yawFor(g)) S.game = 'cs2';
+        saveSettings(); render();
+      };
+    });
+  };
+
+  $('sGame').onchange = (e) => {
+    // gleiche cm/360 behalten, nur in die Einheit des neuen Spiels umrechnen
+    const cm = curCm();
+    S.game = e.target.value;
+    S.sens = +sensFrom(cm, curYaw(), S.dpi).toFixed(4);
+    const g = gameById(S.game);
+    if (g.fov) S.fov = g.fov;
+    saveSettings(); render();
+  };
+  $('sSens').oninput = (e) => { const v = parseNum(e.target.value); if (v > 0) { S.sens = v; saveSettings(); draw(); } };
+  $('sDpi').oninput = (e) => { const v = parseNum(e.target.value); if (v > 0) { S.dpi = v; saveSettings(); draw(); } };
+  el.querySelectorAll('[data-g]').forEach((c) => (c.onchange = () => {
+    S.myGames = c.checked ? [...new Set([...S.myGames, c.dataset.g])] : S.myGames.filter((x) => x !== c.dataset.g);
+    S.myGames.sort((a, b) => GAMES.findIndex((g) => g.id === a) - GAMES.findIndex((g) => g.id === b));
+    saveSettings(); draw();
+  }));
+  $('pCopy').onclick = (e) => copy(cheatSheet(curCm()), e.target);
+  $('pSave').onclick = () => download('aimforge-sensitivitaet.txt', cheatSheet(curCm()), 'text/plain;charset=utf-8');
+  draw();
+}
+
 // ----- Sensitivitäts-Finder -----
 let finder = null;
 
@@ -257,7 +436,7 @@ function pageFinder(el) {
     erst nach jedem Paar gezeigt (Blindtest). Die bessere bleibt, die andere rückt zur Mitte – so wird der Bereich immer enger,
     bis deine beste Sensitivität übrig bleibt. Zum Schluss wird sie anhand deines Bewegungsmusters (Über-/Unterschießen) fein justiert.</p>
     <div class="card"><div class="grid2">
-      <div><label>Startwert</label><b>${n(curCm(), 1)} cm/360°</b><br><small>aus Einstellungen (${esc(gameById(S.game).name)} ${fmtSens(S.sens)})</small></div>
+      <div><label>Startwert</label><b>${n(curCm(), 1)} cm/360°</b><br><small>von der Seite „Sensitivität“</small></div>
       <div><label>Dauer pro Test</label><select id="fDur">${[20, 30, 45].map((d) => `<option ${d == S.finderDuration ? 'selected' : ''} value="${d}">${d} s</option>`).join('')}</select></div>
       <div><label>Runden</label><select id="fRounds">${[4, 5, 6, 7].map((d) => `<option ${d == S.finderRounds ? 'selected' : ''} value="${d}">${d} (≈ ${Math.round(d * 2 * S.finderDuration / 60 + d * 0.5)} min)</option>`).join('')}</select></div>
     </div></div>
@@ -295,7 +474,7 @@ function finderStep(el) {
     const r = f.results[idx];
     return `<div class="card ${idx === sel ? 'sel' : ''}" data-idx="${idx}"><h3>Test ${labelOf(idx)} ${idx === sug ? '<small>· höherer Score</small>' : ''}</h3>
       <div class="big">${r.score}</div><small>Punkte</small>
-      <p style="margin-top:10px">${n(r.cm360, 1)} cm/360° <span class="muted">(${fmtSens(r.sensInGame)} in ${esc(gameById(S.game).name.split(' (')[0])})</span></p>
+      <p style="margin-top:10px">${n(r.cm360, 1)} cm/360° <span class="muted">(${fmtSens(r.sensInGame)} in ${esc(shortName(gameById(S.game)))})</span></p>
       <p class="muted">Treffer ${r.hits} · Genauigkeit ${n(r.acc, 1)} % · Ø ${ms(r.avgTtk)} pro Ziel<br>
       Überschießer ${pct(r.overshootRate)} · erste Bewegung ${pct(r.ratio)}</p></div>`;
   };
@@ -326,22 +505,20 @@ function finderResult(el) {
   const found = f.cm360Of(f.winnerMult);
   const bias = biasAdvice(mergeSummaries(f.finalResults()));
   const fine = found / bias.factor;
-  const rows = GAMES.filter((g) => g.yaw).map((g) =>
-    `<tr><td>${esc(g.name)}</td><td class="num">${fmtSens(sensFrom(fine, g.yaw, S.dpi))}</td><td class="num">${fmtSens(sensFrom(found, g.yaw, S.dpi))}</td></tr>`).join('');
+  const ref = shortName(gameById(S.game));
   const hist = f.history.map((h) => `<tr><td>${h.round}</td>${[0, 1].map((i) =>
     `<td class="num">${h.winner === i ? '<b>' : ''}${n(f.cm360Of(h.pair[i]), 1)} cm · ${h.results[i].score}${h.winner === i ? '</b>' : ''}</td>`).join('')}</tr>`).join('');
   el.innerHTML = `<h2>Deine Sensitivität</h2>
     <div class="grid2">
       <div class="card"><label>Empfehlung (feinjustiert)</label><div class="big">${n(fine, 1)} cm/360°</div>
-        <small>${esc(gameById(S.game).name)}: ${fmtSens(sensFrom(fine, curYaw(), S.dpi))} @ ${S.dpi} DPI</small></div>
+        <small>${esc(ref)}: ${fmtSens(sensFrom(fine, curYaw(), S.dpi))} @ ${S.dpi} DPI</small></div>
       <div class="card"><label>Finder-Ergebnis (nur Paarvergleich)</label><div class="big" style="color:var(--text)">${n(found, 1)} cm/360°</div>
-        <small>Startwert war ${n(f.base, 1)} cm/360°</small></div>
+        <small>${esc(ref)}: ${fmtSens(sensFrom(found, curYaw(), S.dpi))} · Startwert war ${n(f.base, 1)} cm/360°</small></div>
     </div>
     <h3 style="margin-top:20px">Bewegungsanalyse der letzten Runden</h3>${adviceBox(bias)}
     <div class="row" style="margin:16px 0"><button class="primary" id="fApply">Empfehlung übernehmen</button>
       <button id="fApply2">Finder-Ergebnis übernehmen</button><button id="fRestart">Neu starten</button></div>
-    <h3>In deinen Spielen (${S.dpi} DPI, Hipfire)</h3>
-    <table><tr><th>Spiel</th><th class="num">Empfehlung</th><th class="num">Finder-Ergebnis</th></tr>${rows}</table>
+    <p class="muted">Nach dem Übernehmen siehst du auf der Seite „Sensitivität“, welchen Wert du in welchem Spiel einträgst.</p>
     <h3 style="margin-top:24px">Verlauf</h3>
     <table><tr><th>Runde</th><th class="num">Kandidat 1</th><th class="num">Kandidat 2</th></tr>${hist}</table>
     <p class="muted" style="margin-top:14px"><small>Das Ergebnis ist ein Startpunkt, kein Gesetz: Spiele ein paar Tage damit, bevor du
@@ -351,52 +528,11 @@ function finderResult(el) {
     saveSettings();
     history.push({ mode: 'finderResult', date: Date.now(), cm360: cm, score: 0 });
     save('aimforge.history', history);
-    finder = null; page = 'settings'; render();
-// Debug-Zugriff für Tests in der Browser-Konsole
-window.aimforge = { engine, get session() { return session; } };
+    finder = null; page = 'sens'; render();
   };
   $('fApply').onclick = () => apply(fine);
   $('fApply2').onclick = () => apply(found);
   $('fRestart').onclick = () => { finder = null; render(); };
-}
-
-// ----- Umrechner -----
-const conv = { game: S.game, sens: S.sens, dpi: S.dpi, customYaw: S.customYaw, toDpi: S.dpi };
-function pageConvert(el) {
-  el.innerHTML = `<h2>Sensitivitäts-Umrechner</h2>
-    <p class="muted">Rechnet deine Sensitivität über cm/360° (Mausweg für eine volle Drehung) in andere Spiele um.
-    So fühlt sich das Umdrehen in jedem Spiel gleich an.</p>
-    <div class="card"><div class="grid2">
-      <div><label>Von Spiel</label><select id="cGame">${gameOptions(conv.game)}</select></div>
-      <div id="cYawWrap" class="${conv.game === 'custom' ? '' : 'hidden'}"><label>Yaw (Grad pro Count)</label><input id="cYaw" type="number" step="0.0001" value="${conv.customYaw}"></div>
-      <div><label>Sensitivität</label><input id="cSens" type="number" step="0.001" value="${conv.sens}"></div>
-      <div><label>DPI</label><input id="cDpi" type="number" step="50" value="${conv.dpi}"></div>
-      <div><label>Ziel-DPI</label><input id="cToDpi" type="number" step="50" value="${conv.toDpi}"></div>
-    </div></div><div id="cOut"></div>
-    <p class="muted"><small>Die Yaw-Werte gelten für Hipfire. Spiele ändern das gelegentlich per Patch – im Zweifel im Spiel gegenprüfen.
-    Für Spiele, die nicht in der Liste sind, „Eigenes Spiel“ wählen und den Yaw-Wert eintragen.</small></p>`;
-  const out = () => {
-    const g = gameById(conv.game);
-    const cm = cm360From(conv.sens, yawOf(g, conv.customYaw), conv.dpi);
-    const rows = GAMES.filter((x) => x.yaw).map((x) =>
-      `<tr><td>${esc(x.name)}</td><td class="num">${fmtSens(sensFrom(cm, x.yaw, conv.toDpi))}</td></tr>`).join('');
-    $('cOut').innerHTML = `<div class="stats">${stat('cm/360°', n(cm, 2))}${stat('inch/360°', n(cm / 2.54, 2))}${stat('eDPI', Math.round(conv.sens * conv.dpi))}</div>
-      <table><tr><th>Spiel</th><th class="num">Sensitivität @ ${conv.toDpi} DPI</th></tr>${rows}</table>
-      <div class="row" style="margin-top:14px"><button id="cUse">Als Trainings-Sensitivität übernehmen</button></div>`;
-    $('cUse').onclick = () => {
-      Object.assign(S, { game: conv.game, sens: conv.sens, dpi: conv.dpi, customYaw: conv.customYaw });
-      if (g.fov) S.fov = g.fov;
-      saveSettings(); page = 'settings'; render();
-// Debug-Zugriff für Tests in der Browser-Konsole
-window.aimforge = { engine, get session() { return session; } };
-    };
-  };
-  $('cGame').onchange = (e) => { conv.game = e.target.value; render(); };
-  for (const [id, k] of [['cSens', 'sens'], ['cDpi', 'dpi'], ['cToDpi', 'toDpi'], ['cYaw', 'customYaw']]) {
-    const inp = $(id);
-    if (inp) inp.oninput = () => { const v = parseFloat(inp.value); if (v > 0) { conv[k] = v; out(); } };
-  }
-  out();
 }
 
 // ----- Statistik -----
@@ -422,27 +558,17 @@ function pageStats(el) {
     ${rows ? `<table><tr><th>Datum</th><th>Szenario</th><th class="num">Punkte</th><th class="num">Genauigkeit</th><th class="num">cm/360°</th></tr>${rows}</table>` : '<p class="muted">Noch keine Runden gespielt.</p>'}
     <div class="row" style="margin-top:18px"><button id="sExport">Exportieren (JSON)</button><button id="sClear">Verlauf löschen</button></div>`;
   $('sClear').onclick = () => { if (confirm('Gesamten Verlauf löschen?')) { history = []; save('aimforge.history', history); render(); } };
-  $('sExport').onclick = () => {
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(new Blob([JSON.stringify({ settings: S, history }, null, 1)], { type: 'application/json' }));
-    a.download = 'aimforge-verlauf.json';
-    a.click();
-  };
+  $('sExport').onclick = () => download('aimforge-verlauf.json', JSON.stringify({ settings: S, history }, null, 1), 'application/json');
 }
 
-// ----- Einstellungen -----
+// ----- Einstellungen (nur Darstellung, Eingabe, Ton) -----
 function pageSettings(el) {
   const g = gameById(S.game);
   el.innerHTML = `<h2>Einstellungen</h2>
-    <div class="card"><h3>Maus & Sensitivität</h3><div class="grid2">
-      <div><label>Spiel (Referenz)</label><select id="sGame">${gameOptions(S.game)}</select></div>
-      <div class="${S.game === 'custom' ? '' : 'hidden'}"><label>Yaw (Grad pro Count)</label><input id="sYaw" type="number" step="0.0001" value="${S.customYaw}"></div>
-      <div><label>Sensitivität im Spiel</label><input id="sSens" type="number" step="0.001" value="${S.sens}"></div>
-      <div><label>Maus-DPI</label><input id="sDpi" type="number" step="50" value="${S.dpi}"></div>
-    </div><div class="stats" id="sOut"></div></div>
-    <div class="card" style="margin-top:14px"><h3>Darstellung</h3><div class="grid2">
+    <p class="muted">Sensitivität und DPI stellst du auf der Seite „Sensitivität“ ein.</p>
+    <div class="card"><h3>Darstellung</h3><div class="grid2">
       <div><label>Horizontales FOV (16:9)</label><input id="sFov" type="number" step="0.01" min="60" max="130" value="${S.fov}">
-        ${g.fov ? `<small><a href="#" id="sFovGame" style="color:var(--accent)">Standard von ${esc(g.name.split(' (')[0])} (${g.fov}°)</a></small>` : ''}</div>
+        ${g.fov ? `<small><a href="#" id="sFovGame" style="color:var(--accent)">Standard von ${esc(shortName(g))} (${g.fov}°)</a></small>` : ''}</div>
       <div><label>Fadenkreuz</label><select id="sXh"><option value="cross" ${S.xhStyle === 'cross' ? 'selected' : ''}>Kreuz</option><option value="dot" ${S.xhStyle === 'dot' ? 'selected' : ''}>Punkt</option></select></div>
       <div><label>Fadenkreuz-Größe</label><input id="sXhSize" type="number" min="2" max="20" value="${S.xhSize}"></div>
       <div><label>Fadenkreuz-Farbe</label><input id="sXhColor" type="color" value="${S.xhColor}" style="height:38px"></div>
@@ -453,23 +579,17 @@ function pageSettings(el) {
       <label style="color:var(--text)"><input type="checkbox" id="sSound" style="width:auto" ${S.sound ? 'checked' : ''}> Trefferton</label>
       <p class="muted"><small>${engine.rawActive === false ? '⚠️ Dein Browser hat Raw Input zuletzt abgelehnt – die Messwerte können durch Mausbeschleunigung verfälscht sein. ' : ''}
       Ohne Raw Input sollte die Windows-Zeigergeschwindigkeit auf 6/11 stehen und „Zeigerbeschleunigung verbessern“ aus sein.</small></p></div>`;
-  const out = () => {
-    const cm = curCm();
-    $('sOut').innerHTML = stat('cm/360°', n(cm, 2)) + stat('eDPI', Math.round(S.sens * S.dpi)) + stat('Grad pro Count', n(360 / ((cm / 2.54) * S.dpi), 4));
-  };
-  const num = (id, k, re = false) => ($(id).oninput = (e) => { const v = parseFloat(e.target.value); if (v > 0) { S[k] = v; saveSettings(); re ? render() : out(); } });
-  $('sGame').onchange = (e) => { S.game = e.target.value; saveSettings(); render(); };
-  num('sSens', 'sens'); num('sDpi', 'dpi'); num('sFov', 'fov'); num('sXhSize', 'xhSize');
-  if ($('sYaw')) num('sYaw', 'customYaw');
+  const num = (id, k) => ($(id).oninput = (e) => { const v = parseFloat(e.target.value); if (v > 0) { S[k] = v; saveSettings(); } });
+  num('sFov', 'fov'); num('sXhSize', 'xhSize');
   $('sXh').onchange = (e) => { S.xhStyle = e.target.value; saveSettings(); };
   $('sXhColor').oninput = (e) => { S.xhColor = e.target.value; saveSettings(); };
   $('sTColor').oninput = (e) => { S.targetColor = e.target.value; saveSettings(); };
   $('sRaw').onchange = (e) => { S.raw = e.target.checked; saveSettings(); };
   $('sSound').onchange = (e) => { S.sound = e.target.checked; saveSettings(); };
   if ($('sFovGame')) $('sFovGame').onclick = (e) => { e.preventDefault(); S.fov = g.fov; saveSettings(); render(); };
-  out();
 }
 
 render();
-// Debug-Zugriff für Tests in der Browser-Konsole
+
+// Zugriff für automatische Tests und die Browser-Konsole
 window.aimforge = { engine, get session() { return session; } };
