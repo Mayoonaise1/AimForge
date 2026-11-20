@@ -24,6 +24,8 @@ Offline: Die fertige App ist **eine einzige Datei**: `dist/AimForge.html`
   inkl. Rundung des Spielmenüs, DPI-Tipp, Konsolenbefehlen und Spickzettel-Export
 - **Kalibrierung per 360°-Test**: Für Spiele ohne verlässlichen Umrechnungswert (z. B. Battlefield 6, Wardogs)
   einmal mit dem Lineal nachmessen – das Tool lernt daraus die Umrechnung des Spiels
+- **Fähigkeitsprofil**: fester Testlauf (6 × 30 s) für Flick-Tempo, Präzision, bewegte Ziele, Tracking, Umschalten und Reaktion;
+  Bewertung 0–100 (Orientierungswerte), Vergleich mit früheren Profilen, Fokus-Training für die schwächste Fähigkeit
 - **Fortschrittsdiagramme** pro Szenario (Punkte oder Genauigkeit, gleitender Durchschnitt, Trendaussage)
 - **Mausprüfung**: Raw Input, Abfragerate, Touchpad-Erkennung und DPI-Messung mit dem Lineal
 - **Statistik**: Bestwerte, Durchschnitt, Verlauf (gespeichert im Browser), Export und Import;
@@ -36,4 +38,4 @@ npm install
 npm run build      # erzeugt dist/AimForge.html
 ```
 Code in `src/`: `engine.js` (3D/Eingabe), `session.js` (Szenarien), `analysis.js` (Auswertung),
-`finder.js` (Sens-Finder), `games.js` (Spiele & Umrechnung), `main.js` (Oberfläche).
+`finder.js` (Sens-Finder), `profile.js` (Fähigkeitsprofil), `games.js` (Spiele & Umrechnung), `main.js` (Oberfläche).

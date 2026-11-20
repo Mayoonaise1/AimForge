@@ -79,7 +79,7 @@ tr.detail > td { background: var(--panel); padding: 4px 18px 18px; }
   pointer-events: none; }
 #hud div { text-align: center; } #hud b { display: block; font-size: 20px; } #hud span { font-size: 11px; color: var(--muted); }
 #crosshair { position: fixed; left: 50%; top: 50%; pointer-events: none; transform: translate(-50%, -50%); }
-@media (max-width: 700px) { .shotgrid { grid-template-columns: 1fr !important; } nav { width: 64px; } nav .logo, nav .sensbox, nav button span { display: none; } main { padding: 20px 16px; } }
+@media (max-width: 700px) { .skillrow { grid-template-columns: 1fr !important; } .shotgrid { grid-template-columns: 1fr !important; } nav { width: 64px; } nav .logo, nav .sensbox, nav button span { display: none; } main { padding: 20px 16px; } }
 </style>
 </head>
 <body>
@@ -99,6 +99,7 @@ tr.detail > td { background: var(--panel); padding: 4px 18px 18px; }
     <button data-page="train" class="active">🎯 <span>Training</span></button>
     <button data-page="sens">🎮 <span>Sensitivität</span></button>
     <button data-page="finder">🧭 <span>Sens-Finder</span></button>
+    <button data-page="profile">🧬 <span>Profil</span></button>
     <button data-page="stats">📈 <span>Statistik</span></button>
     <button data-page="settings">⚙️ <span>Einstellungen</span></button>
     <div class="sensbox" id="sensbox"></div>

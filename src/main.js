@@ -2,6 +2,7 @@ import { Engine } from './engine.js';
 import { Session, MODES, CATEGORIES } from './session.js';
 import { SensFinder } from './finder.js';
 import { biasAdvice, shotStats, shotAdvice } from './analysis.js';
+import { SKILLS, PROFILE_TESTS, PROFILE_SECONDS, buildProfile, weakest, strongest } from './profile.js';
 import { GAMES, gameById, cm360From, sensFrom, settingFor, yawFromMeasurement, fmtSens } from './games.js';
 
 // ---------- Speicher ----------
@@ -200,7 +201,7 @@ function finish() {
   res.cm360 = p.cm;
   res.game = S.game;
   res.sensInGame = sensFrom(p.cm, curYaw(), S.dpi);
-  if (p.opts.warmup) res.warmup = true;
+  if (p.opts.flag) res[p.opts.flag] = true; // warmup / profile: kürzere Runden, zählen nicht für Bestwerte
   if (!p.opts.noHistory) {
     const { shotLog, ...stored } = res; // Einzelschüsse nur für die Ergebnisseite, nicht im Verlauf speichern
     history.push(stored);
@@ -237,7 +238,7 @@ document.querySelectorAll('nav button').forEach((b) => {
 function render() {
   document.querySelectorAll('nav button').forEach((b) => b.classList.toggle('active', b.dataset.page === page));
   const el = $('page');
-  ({ train: pageTrain, sens: pageSens, finder: pageFinder, stats: pageStats, settings: pageSettings })[page](el);
+  ({ train: pageTrain, profile: pageProfile, sens: pageSens, finder: pageFinder, stats: pageStats, settings: pageSettings })[page](el);
   updateSensbox();
 }
 
@@ -247,7 +248,7 @@ function updateSensbox() {
 }
 
 /** Aufwärmrunden sind kürzer -> nicht mit normalen Runden vergleichen */
-const ranked = (mode) => history.filter((r) => r.mode === mode && !r.warmup);
+const ranked = (mode) => history.filter((r) => r.mode === mode && !r.warmup && !r.profile);
 
 function bestOf(mode) {
   const h = ranked(mode);
@@ -268,6 +269,9 @@ function pageTrain(el) {
   }).join('');
   el.innerHTML = `<h2>Training</h2><p class="muted">Wähle ein Szenario. Gespielt wird mit deiner Sensitivität
     (${n(curCm(), 1)} cm/360°, Seite „Sensitivität“) und ${n(S.fov, 1)}° FOV (Einstellungen).</p>
+    ${profiles.length ? (() => { const w = weakest(profiles[profiles.length - 1]); return `<div class="card click" id="focusCard" style="margin-bottom:14px;border-color:var(--warn)">
+      <h3>🎯 Dein Fokus: ${w.name}</h3><p class="muted" style="margin:0">Laut deinem letzten Profiltest deine schwächste Fähigkeit.
+      ${w.focus.map((m) => MODES[m].name).join(' → ')} in normaler Länge – klicken zum Starten.</p></div>`; })() : ''}
     <div class="card click" id="warmupCard" style="margin-bottom:14px;border-color:var(--accent2)"><h3>🔥 Aufwärmen · ${WARMUP.length * WARMUP_SECONDS / 60} Minuten</h3>
       <p class="muted" style="margin:0">${WARMUP.map((id) => MODES[id].name).join(' → ')}, je ${WARMUP_SECONDS} Sekunden am Stück. Ideal vor dem Spielen
       oder vor dem Sens-Finder. Zählt nicht für Bestwerte.</p></div>
@@ -277,35 +281,137 @@ function pageTrain(el) {
     („Zeigerbeschleunigung verbessern“) aus. Spiele im Vollbild (F11), damit nichts ablenkt.</p></div>`;
   el.querySelectorAll('[data-mode]').forEach((c) => (c.onclick = () => play(c.dataset.mode)));
   $('warmupCard').onclick = () => startWarmup(() => { page = 'train'; render(); });
+  if ($('focusCard')) $('focusCard').onclick = () => startFocus(weakest(profiles[profiles.length - 1]));
 }
 
-// ----- Aufwärm-Playlist -----
+// ----- Playlists: Aufwärmen, Profiltest, Fokus-Training -----
 const WARMUP = ['grid', 'flick', 'micro', 'track'];
 const WARMUP_SECONDS = 30;
 
-/** spielt alle Aufwärm-Szenarien nacheinander; then() wird nach der Zusammenfassung aufgerufen */
-function startWarmup(then) {
+/**
+ * Spielt mehrere Szenarien nacheinander.
+ * items: [{ mode, duration? }] · label: Titel-Präfix · flag: Markierung im Verlauf (warmup/profile)
+ * done(results, aborted) wird am Ende oder bei Abbruch aufgerufen.
+ */
+function playSequence(items, { label, flag, done }) {
   const results = [];
   const next = (i) => {
-    if (i >= WARMUP.length) return warmupSummary(results, then);
-    play(WARMUP[i], {
-      duration: WARMUP_SECONDS, warmup: true,
-      title: `Aufwärmen ${i + 1}/${WARMUP.length} – ${MODES[WARMUP[i]].name}`,
+    if (i >= items.length) return done(results, false);
+    const it = items[i];
+    play(it.mode, {
+      duration: it.duration, flag,
+      title: `${label} ${i + 1}/${items.length} – ${MODES[it.mode].name}`,
       onDone: (res) => { results.push(res); next(i + 1); },
-      onAbort: () => (results.length ? warmupSummary(results, then) : then()),
+      onAbort: () => done(results, true),
     });
   };
   next(0);
 }
 
-function warmupSummary(results, then) {
+function sequenceSummary(title, results, total, then, note = '') {
   const el = $('page');
   const rows = results.map((r) => `<tr><td>${MODES[r.mode].name}</td><td class="num">${r.score}</td><td class="num">${n(r.acc, 1)} %</td></tr>`).join('');
-  el.innerHTML = `<h2>Aufwärmen abgeschlossen</h2>
-    <p class="muted">${results.length} von ${WARMUP.length} Szenarien gespielt. Die Runden findest du auch unter „Statistik“ (mit Trefferbild).</p>
-    <table style="max-width:520px"><tr><th>Szenario</th><th class="num">Punkte</th><th class="num">Genauigkeit</th></tr>${rows}</table>
+  el.innerHTML = `<h2>${title}</h2>
+    <p class="muted">${results.length} von ${total} Szenarien gespielt. Die Runden findest du auch unter „Statistik“ (mit Trefferbild).${note}</p>
+    ${rows ? `<table style="max-width:520px"><tr><th>Szenario</th><th class="num">Punkte</th><th class="num">Genauigkeit</th></tr>${rows}</table>` : ''}
     <div class="row" style="margin-top:18px"><button class="primary" id="wNext">Weiter</button></div>`;
   $('wNext').onclick = then;
+}
+
+/** spielt alle Aufwärm-Szenarien nacheinander; then() wird nach der Zusammenfassung aufgerufen */
+function startWarmup(then) {
+  playSequence(WARMUP.map((mode) => ({ mode, duration: WARMUP_SECONDS })), {
+    label: 'Aufwärmen', flag: 'warmup',
+    done: (results, aborted) => (results.length ? sequenceSummary(`Aufwärmen ${aborted ? 'abgebrochen' : 'abgeschlossen'}`, results, WARMUP.length, then) : then()),
+  });
+}
+
+function startFocus(skill) {
+  playSequence(skill.focus.map((mode) => ({ mode })), {
+    label: `Fokus ${skill.name}`,
+    done: (results, aborted) => (!results.length ? render() : sequenceSummary(`Fokus-Training „${skill.name}“ ${aborted ? 'abgebrochen' : 'abgeschlossen'}`, results, skill.focus.length,
+      () => { page = 'profile'; render(); },
+      ' Diese Runden zählen normal für Bestwerte und Diagramme. Miss deinen Fortschritt in ein paar Tagen mit einem neuen Profiltest.')),
+  });
+}
+
+// ----- Fähigkeitsprofil -----
+const PROFILE_KEY = 'aimforge.profiles';
+let profiles = load(PROFILE_KEY, []);
+const saveProfiles = () => save(PROFILE_KEY, profiles.slice(-100));
+
+function startProfile() {
+  playSequence(PROFILE_TESTS.map((mode) => ({ mode, duration: PROFILE_SECONDS })), {
+    label: 'Profiltest', flag: 'profile',
+    done: (results, aborted) => {
+      if (aborted) {
+        page = 'profile'; render();
+        $('page').insertAdjacentHTML('afterbegin', `<div class="advice info">Profiltest abgebrochen – es wurde kein Profil gespeichert.
+          Nur ein vollständiger Durchlauf ist mit früheren Profilen vergleichbar.</div>`);
+        return;
+      }
+      profiles.push(buildProfile(results, curCm()));
+      saveProfiles();
+      page = 'profile'; render();
+    },
+  });
+}
+
+function pageProfile(el) {
+  const minutes = Math.round((PROFILE_TESTS.length * (PROFILE_SECONDS + 5)) / 60 * 2) / 2;
+  const startButtons = `<div class="row"><button class="primary" id="pStart">${profiles.length ? 'Neuen Profiltest starten' : 'Profiltest starten'} (≈ ${n(minutes, 1)} min)</button>
+    <button id="pWarm">Erst aufwärmen, dann Profiltest</button></div>`;
+  const skillList = SKILLS.map((sk) => `<tr><td>${sk.name}</td><td>${MODES[sk.mode].name}</td><td class="muted">${sk.what}</td></tr>`).join('');
+  const scaleNote = `<p class="muted"><small>Die Punkte 0–100 beruhen auf <b>Orientierungswerten</b>, die ich festgelegt habe – nicht auf Messdaten anderer Spieler.
+    Sie machen Millisekunden und Prozente vergleichbar, um deine schwächste Fähigkeit zu finden. Aussagekräftig für deinen Fortschritt ist der Vergleich mit
+    deinen eigenen früheren Profilen. Mache Profiltests am besten immer unter ähnlichen Bedingungen (aufgewärmt, gleiche Sensitivität).</small></p>`;
+  if (!profiles.length) {
+    el.innerHTML = `<h2>Fähigkeitsprofil</h2>
+      <p class="muted">Ein fester Testlauf aus ${SKILLS.length} Szenarien à ${PROFILE_SECONDS} Sekunden. Danach siehst du deine Stärken und Schwächen
+      und bekommst ein Fokus-Training für die schwächste Fähigkeit. Wiederhole den Test alle paar Tage, um deinen Fortschritt zu sehen.</p>
+      <table style="margin-bottom:18px"><tr><th>Fähigkeit</th><th>Szenario</th><th>Was gemessen wird</th></tr>${skillList}</table>
+      ${startButtons}${scaleNote}`;
+  } else {
+    const cur = profiles[profiles.length - 1], prev = profiles.length > 1 ? profiles[profiles.length - 2] : null, first = profiles[0];
+    const weak = weakest(cur), strong = strongest(cur);
+    const delta = (a, b) => {
+      if (b === undefined || b === null) return '';
+      const d = a - b;
+      return d === 0 ? '<span class="muted">±0</span>' : `<span style="color:${d > 0 ? 'var(--accent)' : 'var(--bad)'}">${d > 0 ? '▲ +' : '▼ '}${d}</span>`;
+    };
+    const bars = SKILLS.map((sk) => {
+      const v = cur.skills[sk.id];
+      if (!v) return '';
+      const tag = sk === weak ? '<span style="color:var(--warn);font-size:12px">⚠ schwächste</span>' : sk === strong ? '<span style="color:var(--accent);font-size:12px">★ stärkste</span>' : '';
+      return `<div style="display:grid;grid-template-columns:150px 1fr 120px;gap:14px;align-items:center;padding:10px 0;border-bottom:1px solid var(--line)" class="skillrow">
+        <div><b>${sk.name}</b><br>${tag}</div>
+        <div><div style="height:10px;background:var(--panel2);border-radius:5px;overflow:hidden"><div style="height:100%;width:${v.score}%;background:${sk === weak ? 'var(--warn)' : 'var(--accent2)'};border-radius:0 5px 5px 0"></div></div>
+          <small>${SKILLS.find((x) => x === sk).rawText(v.raw ?? NaN)}${v.extra ? ' · ' + v.extra : ''}</small></div>
+        <div class="num" style="text-align:right"><b style="font-size:20px">${v.score}</b> ${delta(v.score, prev?.skills[sk.id]?.score)}</div></div>`;
+    }).join('');
+    const sensChanged = prev && Math.abs(cur.cm360 / prev.cm360 - 1) > 0.03;
+    const hist = [...profiles].reverse().slice(0, 15).map((pf) => `<tr><td>${new Date(pf.date).toLocaleString('de-DE', { dateStyle: 'short', timeStyle: 'short' })}</td>
+      <td class="num"><b>${pf.overall}</b></td>${SKILLS.map((sk) => `<td class="num">${pf.skills[sk.id]?.score ?? '–'}</td>`).join('')}<td class="num">${n(pf.cm360, 1)}</td></tr>`).join('');
+    el.innerHTML = `<h2>Fähigkeitsprofil</h2>
+      <div class="grid2">
+        <div class="card"><label>Gesamt (Durchschnitt aller Fähigkeiten)</label><div class="big">${cur.overall}</div>
+          <small>${new Date(cur.date).toLocaleDateString('de-DE')} · ${prev ? `seit letztem Test ${delta(cur.overall, prev.overall)}` : 'Dein erstes Profil – das ist dein Ausgangswert.'}
+          ${profiles.length > 2 ? ` · seit dem ersten ${delta(cur.overall, first.overall)}` : ''}</small></div>
+        <div class="card" style="border-color:var(--warn)"><label>Empfohlener Fokus</label><h3 style="margin:4px 0 6px">${weak.name}</h3>
+          <p class="muted" style="margin-bottom:10px"><small>${weak.what} Training: ${weak.focus.map((m) => MODES[m].name).join(' → ')}.</small></p>
+          <button class="primary" id="pFocus">Fokus-Training starten</button></div>
+      </div>
+      ${sensChanged ? `<div class="advice info">Der letzte Test lief mit einer anderen Sensitivität (${n(prev.cm360, 1)} → ${n(cur.cm360, 1)} cm/360°). Unterschiede können auch daher kommen.</div>` : ''}
+      <h3 style="margin-top:20px">Deine Fähigkeiten</h3>
+      <div>${bars}</div>
+      ${scaleNote}
+      <div style="margin:18px 0">${startButtons}</div>
+      <h3>Verlauf</h3>
+      <div style="overflow-x:auto"><table><tr><th>Datum</th><th class="num">Gesamt</th>${SKILLS.map((sk) => `<th class="num">${sk.name}</th>`).join('')}<th class="num">cm/360°</th></tr>${hist}</table></div>`;
+    $('pFocus').onclick = () => startFocus(weak);
+  }
+  $('pStart').onclick = startProfile;
+  $('pWarm').onclick = () => startWarmup(startProfile);
 }
 
 function resultStats(r) {
@@ -799,8 +905,20 @@ function cleanRun(r) {
   if (!(out.date > 0) || !isFinite(out.score) || !isFinite(out.cm360 ?? 0)) return null;
   if (out.mode !== 'finderResult' && !isFinite(out.acc)) return null;
   if (r.warmup === true) out.warmup = true;
+  if (r.profile === true) out.profile = true;
   if (typeof r.game === 'string' && GAMES.some((g) => g.id === r.game)) out.game = r.game;
   return out;
+}
+function cleanProfile(p) {
+  if (!p || typeof p !== 'object' || !(Number(p.date) > 0) || !p.skills || typeof p.skills !== 'object') return null;
+  const skills = {};
+  for (const sk of SKILLS) {
+    const v = p.skills[sk.id];
+    if (v && isFinite(Number(v.score))) skills[sk.id] = { raw: isFinite(Number(v.raw)) && v.raw !== null ? Number(v.raw) : null, score: Math.max(0, Math.min(100, Math.round(Number(v.score)))), extra: '' };
+  }
+  if (!Object.keys(skills).length) return null;
+  const vals = Object.values(skills).map((x) => x.score);
+  return { date: Number(p.date), cm360: Number(p.cm360) || NaN, skills, overall: Math.round(vals.reduce((a, b) => a + b, 0) / vals.length), complete: vals.length === SKILLS.length };
 }
 function cleanCalib(c) {
   const out = {};
@@ -842,13 +960,13 @@ function pageStats(el) {
   }).join('');
   const played = modes.filter(([id]) => ranked(id).length);
   if (!statMode || !ranked(statMode).length) {
-    const lastRun = history.filter((r) => MODES[r.mode] && !MODES[r.mode].hidden && !r.warmup).sort((x, y) => y.date - x.date)[0];
+    const lastRun = history.filter((r) => MODES[r.mode] && !MODES[r.mode].hidden && !r.warmup && !r.profile).sort((x, y) => y.date - x.date)[0];
     statMode = lastRun?.mode ?? null;
   }
   const rows = history.slice(-40).reverse().map((r) => {
     const d = new Date(r.date).toLocaleString('de-DE', { dateStyle: 'short', timeStyle: 'short' });
     if (r.mode === 'finderResult') return `<tr><td>${d}</td><td>Sens-Finder</td><td class="num" colspan="2">Ergebnis übernommen</td><td class="num">${n(r.cm360, 1)}</td></tr>`;
-    return `<tr class="expand" data-date="${r.date}"><td><span class="arrow">▸</span> ${d}</td><td>${MODES[r.mode]?.name ?? r.mode}${r.warmup ? ' <small>(Aufwärmen)</small>' : ''}</td><td class="num">${r.score}</td><td class="num">${n(r.acc, 1)} %</td><td class="num">${n(r.cm360, 1)}</td></tr>`;
+    return `<tr class="expand" data-date="${r.date}"><td><span class="arrow">▸</span> ${d}</td><td>${MODES[r.mode]?.name ?? r.mode}${r.warmup ? ' <small>(Aufwärmen)</small>' : ''}${r.profile ? ' <small>(Profiltest)</small>' : ''}</td><td class="num">${r.score}</td><td class="num">${n(r.acc, 1)} %</td><td class="num">${n(r.cm360, 1)}</td></tr>`;
   }).join('');
   el.innerHTML = `<h2>Statistik</h2>
     <h3>Fortschritt</h3>
@@ -896,11 +1014,12 @@ function pageStats(el) {
     if (confirm('Gesamten Verlauf löschen?')) {
       history = []; save('aimforge.history', history);
       try { localStorage.removeItem(DETAIL_KEY); } catch { /* egal */ }
+      if (profiles.length && confirm('Auch alle Fähigkeitsprofile löschen?')) { profiles = []; saveProfiles(); }
       render();
     }
   };
   $('sExport').onclick = () => download(`aimforge-daten-${new Date().toISOString().slice(0, 10)}.json`,
-    JSON.stringify({ app: 'AimForge', version: 1, exported: Date.now(), settings: S, history, details: load(DETAIL_KEY, {}) }), 'application/json');
+    JSON.stringify({ app: 'AimForge', version: 1, exported: Date.now(), settings: S, history, details: load(DETAIL_KEY, {}), profiles }), 'application/json');
   $('sImport').onclick = () => $('sFile').click();
   $('sFile').onchange = async (e) => {
     const file = e.target.files[0];
@@ -927,6 +1046,12 @@ function pageStats(el) {
       while (keys.length > DETAIL_MAX) delete d[keys.shift()];
       try { localStorage.setItem(DETAIL_KEY, JSON.stringify(d)); } catch { /* Speicher voll: nur Kennzahlen importiert */ }
     }
+    let profNote = '';
+    if (Array.isArray(data.profiles)) {
+      const knownP = new Set(profiles.map((x) => x.date));
+      const okP = data.profiles.map(cleanProfile).filter((x) => x && !knownP.has(x.date));
+      if (okP.length) { profiles = [...profiles, ...okP].sort((a, b) => a.date - b.date); saveProfiles(); profNote = ` ${okP.length} Profil${okP.length === 1 ? '' : 'e'} importiert.`; }
+    }
     let settingsNote = '';
     if (data.settings && typeof data.settings === 'object' && confirm('Auch die Einstellungen (Sensitivität, DPI, Kalibrierungen, Fadenkreuz …) aus der Datei übernehmen?')) {
       for (const k of Object.keys(DEFAULTS)) {
@@ -944,7 +1069,7 @@ function pageStats(el) {
       settingsNote = ' Einstellungen übernommen.';
     }
     render();
-    $('sMsg').textContent = `✔ ${added.length} neue Runde${added.length === 1 ? '' : 'n'} importiert (${valid.length - added.length} waren schon vorhanden).${settingsNote}`;
+    $('sMsg').textContent = `✔ ${added.length} neue Runde${added.length === 1 ? '' : 'n'} importiert (${valid.length - added.length} waren schon vorhanden).${profNote}${settingsNote}`;
   };
 }
 
