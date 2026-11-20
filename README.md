@@ -8,7 +8,11 @@ Offline: Die fertige App ist **eine einzige Datei**: `dist/AimForge.html`
 → einfach in Chrome oder Edge öffnen (Doppelklick), kein Server nötig.
 
 ## Funktionen
-- **Training**: Raster (3 Ziele), Flick, Mikro, Tracking – Ziel getroffen → neues Ziel erscheint
+- **Training** in vier Kategorien – Ziel getroffen → neues Ziel erscheint:
+  - *Klicken*: Raster (3 Ziele), Flick, Mikro, Panzerziele (3 Treffer pro Ziel)
+  - *Bewegte Ziele*: Ausweichen (seitlich laufende Ziele mit plötzlichen Richtungswechseln)
+  - *Tracking*: Tracking, Zielwechsel (3 Ziele, das leuchtende verfolgen, Umschaltzeit wird gemessen)
+  - *Reaktion*: Ziel blitzt auf → so schnell wie möglich treffen, zu frühes Klicken kostet Punkte
 - **Aufwärmen**: 2-Minuten-Playlist über alle Szenarien, optional direkt vor dem Sens-Finder
 - **Bewegungsanalyse** nach jeder Runde: Reaktionszeit, Überschießen/Unterschießen, Korrekturzeit
 - **Trefferbild** nach jeder Runde: Zielscheibe mit allen Einschüssen (Bildschirm- oder Bewegungsrichtungs-Ansicht),

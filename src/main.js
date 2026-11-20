@@ -1,5 +1,5 @@
 import { Engine } from './engine.js';
-import { Session, MODES } from './session.js';
+import { Session, MODES, CATEGORIES } from './session.js';
 import { SensFinder } from './finder.js';
 import { biasAdvice, shotStats, shotAdvice } from './analysis.js';
 import { GAMES, gameById, cm360From, sensFrom, settingFor, yawFromMeasurement, fmtSens } from './games.js';
@@ -86,11 +86,11 @@ function sound(kind) {
   if (!S.sound) return;
   audio ??= new AudioContext();
   const o = audio.createOscillator(), g = audio.createGain();
-  o.type = kind === 'hit' ? 'triangle' : 'sine';
-  o.frequency.value = kind === 'hit' ? 880 : 180;
+  o.type = kind === 'miss' ? 'sine' : 'triangle';
+  o.frequency.value = { hit: 880, tick: 520, miss: 180 }[kind] ?? 440;
   const t = audio.currentTime;
-  g.gain.setValueAtTime(kind === 'hit' ? 0.18 : 0.08, t);
-  g.gain.exponentialRampToValueAtTime(0.001, t + (kind === 'hit' ? 0.09 : 0.12));
+  g.gain.setValueAtTime(kind === 'miss' ? 0.08 : 0.16, t);
+  g.gain.exponentialRampToValueAtTime(0.001, t + (kind === 'miss' ? 0.12 : 0.08));
   o.connect(g).connect(audio.destination);
   o.start(t); o.stop(t + 0.15);
 }
@@ -255,18 +255,23 @@ function bestOf(mode) {
 }
 
 function pageTrain(el) {
-  const cards = Object.entries(MODES).filter(([, m]) => !m.hidden).map(([id, m]) => {
+  const card = ([id, m]) => {
     const best = bestOf(id);
+    const how = m.type === 'track' ? 'Fadenkreuz draufhalten' : m.type === 'reaction' ? 'Warten, dann klicken' : m.hp ? `${m.hp} Treffer pro Ziel` : 'Klicken';
     return `<div class="card click" data-mode="${id}"><h3>${m.name}</h3><p class="muted">${m.desc}</p>
-      <small>${m.duration} s · ${m.type === 'track' ? 'Tracking' : 'Klicken'}</small>
+      <small>${m.duration} s · ${how}</small>
       ${best !== null ? `<div class="best">Bestwert: ${best}</div>` : ''}</div>`;
+  };
+  const cards = Object.entries(CATEGORIES).map(([cat, title]) => {
+    const list = Object.entries(MODES).filter(([, m]) => !m.hidden && m.cat === cat);
+    return list.length ? `<h3 style="margin:22px 0 10px">${title}</h3><div class="cards">${list.map(card).join('')}</div>` : '';
   }).join('');
   el.innerHTML = `<h2>Training</h2><p class="muted">Wähle ein Szenario. Gespielt wird mit deiner Sensitivität
     (${n(curCm(), 1)} cm/360°, Seite „Sensitivität“) und ${n(S.fov, 1)}° FOV (Einstellungen).</p>
     <div class="card click" id="warmupCard" style="margin-bottom:14px;border-color:var(--accent2)"><h3>🔥 Aufwärmen · ${WARMUP.length * WARMUP_SECONDS / 60} Minuten</h3>
       <p class="muted" style="margin:0">${WARMUP.map((id) => MODES[id].name).join(' → ')}, je ${WARMUP_SECONDS} Sekunden am Stück. Ideal vor dem Spielen
       oder vor dem Sens-Finder. Zählt nicht für Bestwerte.</p></div>
-    <div class="cards">${cards}</div>
+    ${cards}
     <div class="card" style="margin-top:20px"><h3>Tipps für genaue Messwerte</h3>
     <p class="muted">Nutze Chrome oder Edge (Raw Input wird dort unterstützt). Schalte im Betriebssystem die Mausbeschleunigung
     („Zeigerbeschleunigung verbessern“) aus. Spiele im Vollbild (F11), damit nichts ablenkt.</p></div>`;
@@ -304,13 +309,23 @@ function warmupSummary(results, then) {
 }
 
 function resultStats(r) {
+  const m = MODES[r.mode] || {};
+  const cm = stat('cm/360°', n(r.cm360, 1));
   if (r.onTarget !== undefined) {
-    return stat('Punkte', r.score) + stat('Zeit am Ziel', n(r.onTarget, 1) + ' %') + stat('cm/360°', n(r.cm360, 1));
+    return stat('Punkte', r.score) + stat('Zeit am Ziel', n(r.onTarget, 1) + ' %') +
+      (r.switchTime !== undefined ? stat('Umschaltzeit (Median)', ms(r.switchTime)) + stat('Zielwechsel', r.switches) : '') + cm;
   }
-  return stat('Punkte', r.score) + stat('Treffer', `${r.hits}/${r.shots}`) + stat('Genauigkeit', n(r.acc, 1) + ' %') +
-    stat('Ziele pro Sekunde', n(r.kps, 2)) + stat('Ø Zeit pro Ziel', ms(r.avgTtk)) + stat('Reaktionszeit (Median)', ms(r.reaction)) +
+  if (m.type === 'reaction') {
+    return stat('Punkte', r.score) + stat('Reaktionszeit (Median)', ms(r.reactionMedian)) + stat('Schnellste Reaktion', ms(r.reactionBest)) +
+      stat('Treffer', r.hits) + stat('Zu früh geklickt', r.early) + stat('Verpasst (> 1,5 s)', r.missedTargets) + stat('Genauigkeit', n(r.acc, 1) + ' %') + cm;
+  }
+  const kills = r.kills ?? r.hits;
+  const base = stat('Punkte', r.score) + stat('Treffer', `${r.hits}/${r.shots}`) + stat('Genauigkeit', n(r.acc, 1) + ' %') +
+    (m.hp ? stat('Ziele zerstört', kills) : '') + stat('Ziele pro Sekunde', n(r.kps, 2)) + stat('Ø Zeit pro Ziel', ms(r.avgTtk));
+  if (m.flickAnalysis === false) return base + cm;
+  return base + stat('Reaktionszeit (Median)', ms(r.reaction)) +
     stat('Erste Bewegung erreicht', pct(r.ratio)) + stat('Überschießer', pct(r.overshootRate)) +
-    stat('Unterschießer', pct(r.undershootRate)) + stat('Korrekturzeit (Median)', ms(r.correction)) + stat('cm/360°', n(r.cm360, 1));
+    stat('Unterschießer', pct(r.undershootRate)) + stat('Korrekturzeit (Median)', ms(r.correction)) + cm;
 }
 
 function adviceBox(a) {
@@ -334,7 +349,8 @@ function showResults(r) {
 
 /** Kennzahlen, Trefferbild und Bewegungsanalyse einer Runde in einen Container zeichnen */
 function showResultBody(box, r) {
-  const a = r.onTarget === undefined ? biasAdvice(r) : null;
+  const m = MODES[r.mode] || {};
+  const a = m.type === 'click' && m.flickAnalysis !== false ? biasAdvice(r) : null;
   box.innerHTML = `<div class="stats">${resultStats(r)}</div>
     ${r.shotLog ? shotSection(r) : '<p class="muted"><small>Kein Trefferbild gespeichert – es wird nur für die letzten ' + DETAIL_MAX + ' Runden aufbewahrt.</small></p>'}
     ${a ? `<h3>Bewegungsanalyse</h3>${adviceBox(a)}
@@ -377,7 +393,8 @@ function targetDiagram(shots, view) {
   const mean = cnt ? `<path d="M${c + (sx / cnt) * R - 8} ${c - (sy / cnt) * R}h16M${c + (sx / cnt) * R} ${c - (sy / cnt) * R - 8}v16" stroke="#ffb648" stroke-width="2.5"/>` : '';
   const rings = [3, 2].map((k) => `<circle cx="${c}" cy="${c}" r="${k * R}" fill="none" stroke="#313a48" stroke-dasharray="4 4"/>
       <text x="${c + k * R * 0.707 + 4}" y="${c - k * R * 0.707 - 4}" fill="#6b7586" font-size="10">${k}×</text>`).join('');
-  const [lo, hi, dirText] = track ? ['hinterher', 'voraus', 'Laufrichtung des Ziels →'] : ['zu kurz', 'zu weit', 'Bewegungsrichtung →'];
+  const moving = track || shots.some((x) => x.moving);
+  const [lo, hi, dirText] = moving ? ['hinterher', 'voraus', 'Laufrichtung des Ziels →'] : ['zu kurz', 'zu weit', 'Bewegungsrichtung →'];
   const labels = view === 'dir'
     ? `<text x="10" y="${c - 6}" fill="#95a0b2" font-size="11">${lo}</text><text x="${W - 10}" y="${c - 6}" fill="#95a0b2" font-size="11" text-anchor="end">${hi}</text>
        <text x="${c}" y="${W - 8}" fill="#95a0b2" font-size="11" text-anchor="middle">${dirText}</text>`
@@ -402,7 +419,7 @@ function shotSection(r) {
       stat('Vorhalt (+) / Nachlauf (−)', `${st.lead >= 0 ? '+' : ''}${Math.round(st.lead * 100)} % Radius`)
     : stat('Ø Abstand Treffer zur Mitte', `${deg(st.centerDist)} <small style="font-size:12px">(${Math.round(st.centerDistN * 100)} % Radius)</small>`) +
       stat('Streuung', deg(st.spread)) + stat('Mittlere Abweichung', bias) +
-      stat('Fehlschüsse zu kurz / zu weit', `${st.missShort} / ${st.missFar}`);
+      stat(st.moving ? 'Fehlschüsse hinterher / voraus' : 'Fehlschüsse zu kurz / zu weit', `${st.missShort} / ${st.missFar}`);
   const legend = st.track
     ? '<span style="color:var(--accent)">●</span> auf dem Ziel · <span style="color:var(--bad)">●</span> daneben (alle 50 ms gemessen)'
     : '<span style="color:var(--accent)">●</span> Treffer · <span style="color:var(--bad)">✕</span> Fehlschuss · <span style="color:var(--bad)">○</span> weit daneben (am Rand)';
@@ -422,7 +439,7 @@ function shotSection(r) {
 
 function bindShotSection(box, r) {
   if (!box.querySelector('[data-diagram]')) return;
-  const track = r.shotLog[0]?.track;
+  const track = r.shotLog[0]?.track || r.shotLog.some((x) => x.moving);
   const info = {
     dir: track
       ? 'Gedreht in die Laufrichtung des Ziels: Punkte rechts der Mitte = du warst voraus, links = du hingst hinterher.'
@@ -773,7 +790,8 @@ function progressChart(box, runs, metric) {
 
 /** Eintrag aus einer Import-Datei auf bekannte Felder und Zahlen reduzieren */
 const RUN_NUM = ['date', 'duration', 'score', 'acc', 'hits', 'shots', 'kps', 'flicks', 'avgTtk', 'reaction', 'ratio',
-  'overshootRate', 'undershootRate', 'correction', 'onTarget', 'cm360', 'sensInGame'];
+  'overshootRate', 'undershootRate', 'correction', 'onTarget', 'cm360', 'sensInGame',
+  'kills', 'reactionMedian', 'reactionBest', 'early', 'missedTargets', 'switchTime', 'switches'];
 function cleanRun(r) {
   if (!r || typeof r !== 'object' || !(MODES[r.mode] || r.mode === 'finderResult')) return null;
   const out = { mode: r.mode };

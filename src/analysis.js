@@ -136,6 +136,7 @@ export function shotStats(shots) {
   const misses = dirShots.filter((s) => !s.hit && Math.hypot(s.dx, s.dy) <= s.r * 6);
   return {
     track,
+    moving: shots.some((s) => s.moving),
     n: shots.length,
     hits: hits.length,
     centerDist: m(hits, (s) => Math.hypot(s.dx, s.dy)),
@@ -159,7 +160,12 @@ export function shotAdvice(st) {
     else out.push({ level: 'ok', text: 'Du bleibst beim Verfolgen gut mittig am Ziel – kein deutliches Hinterherhängen oder Vorauseilen.' });
     return out;
   }
-  if (st.missesDir >= 3) {
+  if (st.moving && st.missesDir >= 3) {
+    const far = st.missFar / st.missesDir;
+    if (far >= 0.65) out.push({ level: 'warn', text: `${Math.round(far * 100)} % deiner Fehlschüsse liegen vor dem laufenden Ziel: Du hältst zu weit vor oder klickst, kurz bevor es die Richtung wechselt. Etwas weniger vorhalten.` });
+    else if (far <= 0.35) out.push({ level: 'warn', text: `${Math.round((1 - far) * 100)} % deiner Fehlschüsse liegen hinter dem laufenden Ziel: Du zielst dorthin, wo es gerade war. Bewegung mitgehen und leicht in Laufrichtung vorhalten.` });
+    else out.push({ level: 'ok', text: 'Deine Fehlschüsse verteilen sich gleichmäßig vor und hinter dem laufenden Ziel – kein systematisches Hinterherhängen.' });
+  } else if (st.missesDir >= 3) {
     const far = st.missFar / st.missesDir;
     if (far >= 0.65) out.push({ level: 'warn', text: `${Math.round(far * 100)} % deiner Fehlschüsse liegen in Bewegungsrichtung hinter dem Ziel: Du klickst, während du noch über das Ziel hinausschwingst. Erst abbremsen, dann schießen. Zeigt die Bewegungsanalyse zusätzlich viele Überschießer, ist die Sensitivität wahrscheinlich zu hoch.` });
     else if (far <= 0.35) out.push({ level: 'warn', text: `${Math.round((1 - far) * 100)} % deiner Fehlschüsse liegen noch vor dem Ziel: Du klickst, bevor das Fadenkreuz angekommen ist. Den Flick zu Ende führen und einen Tick später schießen – das ist eine Frage des Timings, nicht der Sensitivität.` });
