@@ -2,7 +2,7 @@ import { Engine } from './engine.js';
 import { icon } from './icons.js';
 import { confirmDialog, toast } from './ui.js';
 import { Session, MODES, CATEGORIES } from './session.js';
-import { SensFinder, TEST_LENGTHS, combineRuns } from './finder.js';
+import { SensFinder, TEST_LENGTHS, TIE_LIMIT, combineRuns } from './finder.js';
 import { biasAdvice, shotStats, shotAdvice } from './analysis.js';
 import { SKILLS, PROFILE_TESTS, PROFILE_SECONDS, buildProfile, weakest, strongest } from './profile.js';
 import { GAMES, gameById, cm360From, sensFrom, settingFor, yawFromMeasurement, fmtSens } from './games.js';
@@ -31,8 +31,49 @@ function yawStatus(g) {
   if (c?.yaw) return { kind: 'ok', text: c.date ? `von dir gemessen am ${new Date(c.date).toLocaleDateString('de-DE')}` : 'eigener Wert' };
   if (g.yaw && g.verified === false) return { kind: 'warn', text: 'Community-Wert – einmal per 360°-Test prüfen' };
   if (g.yaw) return { kind: 'ok', text: 'bekannter Standardwert des Spiels' };
+  if (g.shows) return { kind: 'ok', text: 'Spiel zeigt cm/360° selbst an – exakt, ohne Umrechnung' };
   if (g.estimate) return { kind: 'warn', text: 'nur geschätzt – bitte kalibrieren' };
   return { kind: 'missing', text: 'noch nicht kalibriert' };
+}
+
+/**
+ * Für Spiele, die cm/360° selbst anzeigen (Battlefield 6): Welcher Wert soll in der Anzeige stehen?
+ * Die Anzeige rechnet mit der DPI-Zeile – gleiche Mausweg-Counts wie bei uns: cm(Zeile) = cm * eigeneDPI / ZeilenDPI.
+ */
+function shownTargets(g, cm) {
+  const step = g.shows.step || 0.1;
+  return g.shows.dpis.map((dpi) => {
+    const v = (cm * S.dpi) / dpi;
+    return { dpi, cm: v, text: (Math.round(v / step) * step).toFixed(1).replace('.', ','), inch: ((v / 2.54)).toFixed(1).replace('.', ',') };
+  });
+}
+/** Zeile, an der man sich orientieren soll: die eigene DPI, sonst 800 */
+const mainShown = (g, cm) => shownTargets(g, cm).find((t) => t.dpi === S.dpi) || shownTargets(g, cm)[0];
+const dpiFmt = (d) => d.toLocaleString('de-DE');
+
+/** Eingabezeile: aktuellen Wert aus einem Spiel mit eigener cm/360°-Anzeige (BF6) als Ausgangspunkt übernehmen */
+function shownImportHtml() {
+  return GAMES.filter((g) => g.shows).map((g) => `<details style="margin-top:14px" data-shown="${g.id}">
+    <summary style="cursor:pointer;color:var(--accent);font-size:13px;font-weight:600">${icon('chevron-right', 14)} Wert aus ${esc(shortName(g))} übernehmen (wird dort im Menü angezeigt)</summary>
+    <div class="row" style="margin-top:10px;align-items:flex-end">
+      <div style="flex:1;min-width:110px"><label>Angezeigt: cm</label><input data-sh-cm type="text" inputmode="decimal" placeholder="z. B. 30,9"></div>
+      <div style="width:130px"><label>in der Zeile</label><select data-sh-dpi>${g.shows.dpis.map((d) => `<option value="${d}" ${d === S.dpi ? 'selected' : ''}>${dpiFmt(d)} DPI</option>`).join('')}</select></div>
+      <button data-sh-ok>${icon('check', 15)} Übernehmen</button></div>
+    <p class="muted" style="margin:8px 0 0"><small>Setzt deinen Ausgangswert auf genau die Empfindlichkeit, die du gerade in ${esc(shortName(g))} spielst.</small></p></details>`).join('');
+}
+function bindShownImport(root, after) {
+  root.querySelectorAll('[data-shown]').forEach((box) => {
+    const g = gameById(box.dataset.shown);
+    box.querySelector('[data-sh-ok]').onclick = () => {
+      const shown = parseNum(box.querySelector('[data-sh-cm]').value), dpi = +box.querySelector('[data-sh-dpi]').value;
+      if (!(shown > 0)) { toast('Bitte den angezeigten cm-Wert eintragen', 'warn'); return; }
+      const cm = (shown * dpi) / S.dpi; // gleiche Counts pro 360° bei deiner DPI
+      S.sens = +sensFrom(cm, curYaw(), S.dpi).toFixed(4);
+      saveSettings();
+      toast(`Ausgangswert: ${n(cm, 1)} cm/360° – wie in ${shortName(g)}`);
+      after();
+    };
+  });
 }
 // Referenzspiel ohne Umrechnungswert -> auf CS2 zurückfallen
 if (!yawFor(gameById(S.game))) S.game = 'cs2';
@@ -45,12 +86,16 @@ const shortName = (g) => g.name.split(' (')[0];
 const DETAIL_KEY = 'aimforge.details', DETAIL_MAX = 60;
 const q = (v) => (v === null || v === undefined ? null : Math.round(v * 1000));
 const uq = (v) => (v === null ? null : v / 1000);
-function saveDetails(date, log) {
-  if (!log || !log.length) return;
-  const track = !!log[0].track;
+const PATH_KINDS = ['clean', 'over', 'short', 'm-early', 'm-over', 'm-short', 'm-side'];
+function saveDetails(date, log, paths = []) {
+  if ((!log || !log.length) && !paths.length) return;
+  log = log || [];
+  const track = !!log[0]?.track;
   const list = track ? log.filter((_, i) => i % 2 === 0) : log; // Tracking: 100-ms-Raster reicht für die Grafik
   const d = load(DETAIL_KEY, {});
   d[date] = { t: track ? 1 : 0, s: list.map((x) => [q(x.dx), q(x.dy), q(x.r), x.hit ? 1 : 0, q(x.ux), q(x.uy)]) };
+  // Mauswege: [Art, Zielradius/Strecke, x1, y1, x2, y2, …] in Tausendsteln
+  if (paths.length) d[date].p = paths.map((w) => [PATH_KINDS.indexOf(w.k), q(w.rN), Math.round(w.dt || 0), ...w.p.flatMap(([x, y]) => [q(x), q(y)])]);
   const keys = Object.keys(d).sort((a, b) => a - b);
   while (keys.length > DETAIL_MAX) delete d[keys.shift()];
   // Speicher voll -> älteste Trefferbilder opfern, bis es passt
@@ -61,9 +106,18 @@ function saveDetails(date, log) {
     }
   }
 }
+function loadPaths(date) {
+  const e = load(DETAIL_KEY, {})[date];
+  if (!e || !Array.isArray(e.p)) return null;
+  return e.p.map(([k, rN, dt, ...xy]) => {
+    const p = [];
+    for (let i = 0; i + 1 < xy.length; i += 2) p.push([xy[i] / 1000, xy[i + 1] / 1000]);
+    return { k: PATH_KINDS[k] || 'clean', rN: rN / 1000, dt, p };
+  });
+}
 function loadDetails(date) {
   const e = load(DETAIL_KEY, {})[date];
-  if (!e) return null;
+  if (!e || !e.s.length) return null;
   return e.s.map(([dx, dy, r, hit, ux, uy]) => ({ dx: dx / 1000, dy: dy / 1000, r: r / 1000, hit: !!hit, ux: uq(ux), uy: uq(uy), track: !!e.t }));
 }
 
@@ -227,9 +281,9 @@ function finish() {
   res.sensInGame = sensFrom(p.cm, curYaw(), S.dpi);
   if (p.opts.flag) res[p.opts.flag] = true; // warmup / profile: kürzere Runden, zählen nicht für Bestwerte
   if (!p.opts.noHistory) {
-    const { shotLog, ...stored } = res; // Einzelschüsse nur für die Ergebnisseite, nicht im Verlauf speichern
+    const { shotLog, paths, ...stored } = res; // Einzelschüsse und Wege nur für die Detailansicht, nicht im Verlauf
     history.push(stored);
-    saveDetails(res.date, shotLog);
+    saveDetails(res.date, shotLog, paths);
     if (history.length > 500) history = history.slice(-500);
     save('aimforge.history', history);
   }
@@ -500,12 +554,99 @@ function showResults(r) {
 function showResultBody(box, r) {
   const m = MODES[r.mode] || {};
   const a = m.type === 'click' && m.flickAnalysis !== false ? biasAdvice(r) : null;
+  const withPath = a && r.paths && r.paths.length;
   box.innerHTML = `<div class="stats">${resultStats(r)}</div>
     ${r.shotLog ? shotSection(r) : '<p class="muted"><small>Kein Trefferbild gespeichert – es wird nur für die letzten ' + DETAIL_MAX + ' Runden aufbewahrt.</small></p>'}
-    ${a ? `<h3>Bewegungsanalyse</h3>${adviceBox(a)}
+    ${withPath ? pathSection(r, a) : a ? `<h3>Bewegungsanalyse</h3>${adviceBox(a)}
       <p class="muted"><small>„Erste Bewegung erreicht“: Wie weit dein schneller Anfangs-Flick in Richtung Ziel kommt, bevor du abbremst.
       Leicht unter 100 % ist ideal – darüber überschießt du, weit darunter brauchst du viele Korrekturen.</small></p>` : ''}`;
   if (r.shotLog) bindShotSection(box, r);
+  if (withPath) {
+    const info = { way: 'Von oben betrachtet: Wo ist die Maus entlanggefahren? Wege rechts vom Ziel sind darüber hinausgeschossen.',
+      time: 'Fortschritt Richtung Ziel über die Zeit: Eine Kurve über der Ziel-Linie = überschossen, flach unter der Linie = zu kurz. ✕ = Klick daneben.' };
+    const show = (v) => {
+      box.querySelector('[data-pathdiag]').innerHTML = pathDiagram(r.paths, v);
+      box.querySelector('[data-pathinfo]').textContent = info[v];
+      box.querySelectorAll('[data-pv]').forEach((b) => { b.className = b.dataset.pv === v ? 'primary' : ''; });
+    };
+    box.querySelectorAll('[data-pv]').forEach((b) => (b.onclick = () => show(b.dataset.pv)));
+    show('way');
+  }
+}
+
+// ----- Mausweg: alle Wege zum Ziel, gedreht auf „Start links, Ziel rechts“ -----
+const PATH_STYLE = {
+  clean: { c: '#2aa87f', name: 'sauber' }, over: { c: '#c2831f', name: 'über das Ziel hinaus' }, short: { c: '#6487ea', name: 'zu kurz, nachkorrigiert' },
+};
+const MISS_NAME = { 'm-early': 'zu früh (noch im Anflug)', 'm-over': 'drüber hinaus', 'm-short': 'zu kurz stehen geblieben', 'm-side': 'seitlich daneben' };
+
+const LAT = 2.5; // seitliche Abweichung im Weg-Diagramm vergrößert darstellen
+function pathDiagram(paths, view = 'way') {
+  const W = 620, H = 270, X0 = 40, Y0 = H / 2;
+  const rN = paths.map((w) => w.rN).filter((v) => v > 0).sort((a, b) => a - b)[paths.length >> 1] || 0.07;
+  let lines = '', marks = '', grid = '', target = '';
+  const draw = (w, pts) => {
+    const d = pts.map(([x, y], i) => `${i ? 'L' : 'M'}${x.toFixed(1)} ${y.toFixed(1)}`).join('');
+    if (w.k.startsWith('m-')) {
+      lines += `<path d="${d}" fill="none" stroke="#ff5a6e" stroke-width="1.2" stroke-opacity=".4" stroke-dasharray="3 3"/>`;
+      const [x, y] = pts[pts.length - 1];
+      marks += `<path d="M${x - 5} ${y - 5}l10 10M${x + 5} ${y - 5}l-10 10" stroke="#ff5a6e" stroke-width="2.2" stroke-linecap="round"/>`;
+    } else lines += `<path d="${d}" fill="none" stroke="${PATH_STYLE[w.k].c}" stroke-width="1.6" stroke-opacity=".6" stroke-linejoin="round"/>`;
+  };
+  if (view === 'way') {
+    const U = (W - X0 - 20) / 1.4;
+    const X = (x) => X0 + Math.max(-0.05, Math.min(1.4, x)) * U, Y = (y) => Y0 - Math.max(-0.45, Math.min(0.45, y * LAT)) * U;
+    grid = [0, 0.5, 1, 1.25].map((x) => `<line x1="${X(x)}" x2="${X(x)}" y1="16" y2="${H - 24}" stroke="#222b39" ${x === 1 ? '' : 'stroke-dasharray="3 4"'}/>
+      <text x="${X(x)}" y="${H - 8}" fill="#7d899b" font-size="11" text-anchor="middle">${x === 0 ? 'Start' : x === 1 ? 'Ziel' : Math.round(x * 100) + ' %'}</text>`).join('') +
+      `<text x="${W - 10}" y="16" fill="#566273" font-size="10.5" text-anchor="end">seitlich ${String(LAT).replace('.', ',')}× vergrößert</text>`;
+    target = `<ellipse cx="${X(1)}" cy="${Y0}" rx="${rN * U}" ry="${rN * U * LAT}" fill="rgba(255,77,94,.12)" stroke="#ff4d63" stroke-width="1.5"/><circle cx="${X(0)}" cy="${Y0}" r="4" fill="#7d899b"/>`;
+    for (const w of paths) draw(w, w.p.map(([x, y]) => [X(x), Y(y)]));
+  } else {
+    const tMax = Math.min(1500, Math.max(400, ...paths.map((w) => (w.dt || 20) * (w.p.length - 1))));
+    const X = (t) => X0 + (t / tMax) * (W - X0 - 20), Y = (v) => H - 26 - (Math.max(0, Math.min(1.45, v)) / 1.45) * (H - 46);
+    grid = [0, 0.5, 1].map((v) => `<line x1="${X0}" x2="${W - 20}" y1="${Y(v)}" y2="${Y(v)}" stroke="#222b39" ${v === 1 ? '' : 'stroke-dasharray="3 4"'}/>
+      <text x="${X0 - 6}" y="${Y(v) + 4}" fill="#7d899b" font-size="11" text-anchor="end">${v === 1 ? 'Ziel' : Math.round(v * 100) + ' %'}</text>`).join('') +
+      [0, tMax / 2, tMax].map((t) => `<text x="${X(t)}" y="${H - 8}" fill="#7d899b" font-size="11" text-anchor="${t === 0 ? 'start' : t === tMax ? 'end' : 'middle'}">${Math.round(t)} ms</text>`).join('');
+    target = `<rect x="${X0}" y="${Y(1 + rN)}" width="${W - X0 - 20}" height="${Y(1 - rN) - Y(1 + rN)}" fill="rgba(255,77,94,.1)"/>`;
+    for (const w of paths) {
+      const dt = w.dt || 20;
+      draw(w, w.p.map(([x], i) => [X(i === w.p.length - 1 && i > 0 ? (i - 1) * dt + dt * 0.5 : i * dt), Y(x)]));
+    }
+  }
+  // Wege, die länger dauern als der Ausschnitt, werden am Rand abgeschnitten statt gestaucht
+  return `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="Mauswege zum Ziel" style="display:block;background:var(--bg2);border-radius:12px">
+    <defs><clipPath id="pclip"><rect x="${X0 - 8}" y="8" width="${W - X0 - 12 + 8}" height="${H - 24}"/></clipPath></defs>
+    ${grid}${target}<g clip-path="url(#pclip)">${lines}${marks}</g></svg>`;
+}
+
+function pathSection(r, advice) {
+  const paths = r.paths;
+  const hitsP = paths.filter((w) => !w.k.startsWith('m-'));
+  const count = (k) => paths.filter((w) => w.k === k).length;
+  const legend = Object.entries(PATH_STYLE).map(([k, v]) => `<span style="display:inline-flex;align-items:center;gap:6px;margin-right:14px">
+      <svg width="18" height="6"><line x1="0" x2="18" y1="3" y2="3" stroke="${v.c}" stroke-width="2.5"/></svg>${v.name} <b>${count(k)}</b></span>`).join('') +
+    `<span style="display:inline-flex;align-items:center;gap:6px"><span style="color:#ff5a6e;font-weight:700">✕</span> Fehlschuss <b>${paths.length - hitsP.length}</b></span>`;
+  const mc = r.missClicks || 0;
+  const missRows = mc ? Object.entries(MISS_NAME).map(([k, name]) => {
+    const v = { 'm-early': r.missEarly, 'm-over': r.missOver, 'm-short': r.missShort, 'm-side': r.missSide }[k] || 0;
+    return `<div class="row" style="justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--line)"><span class="muted">${name}</span><b>${v}</b></div>`;
+  }).join('') : '<p class="muted"><small>Keine Fehlschüsse mit auswertbarem Weg.</small></p>';
+  return `<h3 style="margin-top:22px">Mausweg</h3>
+    <p class="muted" style="margin-top:-4px"><small>Jeder Weg ist so gedreht, dass er links startet und das Ziel rechts liegt (100 % = Zielmitte).
+      So siehst du, ob deine Bewegung über das Ziel hinausführt, zu kurz endet oder sauber ankommt – und wo Fehlschüsse fielen.</small></p>
+    <div style="display:grid;grid-template-columns:minmax(300px,1.6fr) 1fr;gap:20px;align-items:start" class="shotgrid">
+      <div><div class="row" style="margin-bottom:10px"><button data-pv="way" class="primary" style="padding:5px 12px">Weg</button>
+          <button data-pv="time" style="padding:5px 12px">Verlauf über Zeit</button></div>
+        <div data-pathdiag>${pathDiagram(paths, 'way')}</div><p data-pathinfo class="muted" style="font-size:12px;margin:6px 0 0"></p>
+        <p style="font-size:12.5px;margin-top:8px;color:var(--text2)">${legend}</p></div>
+      <div><div class="stats" style="margin-top:0;grid-template-columns:1fr 1fr">
+          ${stat('Sauber angekommen', pct(r.cleanRate))}${stat('Über das Ziel hinaus', pct(r.overshootRate))}
+          ${stat('Ø Korrekturen pro Ziel', isFinite(r.corrections) ? n(r.corrections, 1) : '–')}${stat('Weg-Effizienz', pct(r.efficiency))}</div>
+        <label style="margin-top:4px">Fehlschüsse – wo war die Maus beim Klick?</label>${missRows}</div>
+    </div>
+    <h3 style="margin-top:18px">Was das für deine Sensitivität bedeutet</h3>${adviceBox(advice)}
+    <p class="muted"><small>„Weg-Effizienz“: gerade Strecke geteilt durch den tatsächlichen Weg (100 % = schnurgerade). „Zu früh“ heißt: Die Maus war beim Klick
+    noch deutlich in Bewegung Richtung Ziel – das ist eine Timing-Frage, keine Sensitivitäts-Frage.</small></p>`;
 }
 
 // ----- Trefferbild -----
@@ -582,7 +723,7 @@ function shotSection(r) {
           Der rote Kreis ist das Ziel, alle Ziele sind auf dieselbe Größe skaliert.</p></div>
       <div><p class="muted" data-viewinfo style="margin-top:0"></p>
         <div class="stats" style="margin-top:0;grid-template-columns:repeat(auto-fill,minmax(170px,1fr))">${figures}</div>
-        ${shotAdvice(st).map(adviceBox).join('')}</div>
+        ${shotAdvice(st, { skipMiss: !!(r.paths && r.paths.length) }).map(adviceBox).join('')}</div>
     </div>`;
 }
 
@@ -610,6 +751,12 @@ function cheatSheet(cm) {
     `Ziel: ${n(cm, 2)} cm/360° bei ${S.dpi} DPI (Hipfire)`, ''];
   for (const id of S.myGames) {
     const g = gameById(id), yaw = yawFor(g);
+    if (g.shows) {
+      const main = mainShown(g, cm);
+      lines.push(`${g.name}: Regler so einstellen, dass bei ${dpiFmt(main.dpi)} DPI ${main.inch} Zoll / ${main.text} cm angezeigt werden`);
+      if (g.where) lines.push(`   Einstellen: ${g.where}`);
+      continue;
+    }
     if (!yaw) { lines.push(`${g.name}: noch nicht kalibriert`); continue; }
     const st = settingFor(g, yaw, cm, S.dpi);
     lines.push(`${g.name}: ${st.text}` + (g.cmd ? `   (Konsole: ${g.cmd.replace('{s}', st.text)})` : '') +
@@ -626,7 +773,14 @@ function gameCard(g, cm) {
   const yaw = yawFor(g), status = yawStatus(g), c = S.calib[g.id];
   const color = status.kind === 'ok' ? 'var(--accent)' : 'var(--warn)';
   let body;
-  if (yaw) {
+  if (g.shows) {
+    const main = mainShown(g, cm);
+    body = `<label>Regler einstellen, bis angezeigt wird</label><div class="big">${main.text} cm</div>
+      <small>Zeile „${dpiFmt(main.dpi)} DPI“ im Spielmenü${main.dpi !== S.dpi ? ` (du nutzt ${S.dpi} DPI – die Zeile ist trotzdem richtig umgerechnet)` : ''}</small>
+      <div style="margin-top:10px;font-size:13px">${shownTargets(g, cm).map((t) => `<div class="row" style="justify-content:space-between;padding:3px 0;border-bottom:1px solid var(--line)">
+        <span class="muted">${dpiFmt(t.dpi)} DPI</span><span style="font-variant-numeric:tabular-nums">${t.inch} Zoll / <b>${t.text} cm</b></span></div>`).join('')}</div>
+      ${yaw ? `<p class="muted" style="font-size:13px;margin-top:8px">Reglerwert laut deiner Kalibrierung etwa <b style="color:var(--text)">${settingFor(g, yaw, cm, S.dpi).text}</b></p>` : ''}`;
+  } else if (yaw) {
     const st = settingFor(g, yaw, cm, S.dpi);
     const dev = Math.abs(st.deviation);
     const cmd = g.cmd ? g.cmd.replace('{s}', st.text) : null;
@@ -644,7 +798,7 @@ function gameCard(g, cm) {
     ${body}
     ${g.where ? `<p class="muted"><small>${esc(g.where)}</small></p>` : ''}
     ${g.notes ? `<p class="muted"><small>${esc(g.notes)}</small></p>` : ''}
-    <details ${yaw ? '' : 'open'}><summary style="cursor:pointer;color:var(--accent);font-size:13px">${c ? 'Neu messen' : 'Kalibrieren (360°-Test)'}</summary>
+    ${g.shows ? '' : `<details ${yaw ? '' : 'open'}><summary style="cursor:pointer;color:var(--accent);font-size:13px">${c ? 'Neu messen' : 'Kalibrieren (360°-Test)'}</summary>
       <div class="grid2" style="margin-top:10px;grid-template-columns:1fr 1fr">
         <div><label>Im Spiel eingestellt</label><input data-cal-sens type="text" inputmode="decimal" value="${c?.sens ?? (yaw ? settingFor(g, yaw, cm, S.dpi).text : '')}"></div>
         <div><label>Gemessen: cm für 360°</label><input data-cal-cm type="text" inputmode="decimal" placeholder="z. B. 38,5"></div>
@@ -653,7 +807,7 @@ function gameCard(g, cm) {
         ${c ? '<button data-cal-reset style="padding:5px 12px">Messung löschen</button>' : ''}</div>
       <p class="muted" data-cal-msg style="font-size:12px;margin-top:6px">Mit ${S.dpi} DPI messen. Danach den neuen Wert eintragen und noch einmal messen –
       passt es, bist du fertig, sonst die neue Messung speichern.</p>
-    </details></div>`;
+    </details>`}</div>`;
 }
 
 function pageSens(el) {
@@ -672,7 +826,7 @@ function pageSens(el) {
           <div><label>Sensitivität dort</label><input id="sSens" type="text" inputmode="decimal" value="${S.sens}"></div>
           <div><label>Maus-DPI <a href="#" id="sDpiCheck" style="color:var(--accent);font-size:12px">nachmessen</a></label><input id="sDpi" type="text" inputmode="numeric" value="${S.dpi}"></div>
         </div>
-        <div class="big" id="sValue" style="margin-top:12px"></div><small id="sValueSub"></small></div>
+        <div class="big" id="sValue" style="margin-top:12px"></div><small id="sValueSub"></small>${shownImportHtml()}</div>
       <div class="card"><h3>Einmal pro Spiel prüfen</h3><p class="muted" style="margin:0"><small>
         ${['Mausbeschleunigung im Spiel aus', '„Raw Input“ an, falls es die Option gibt', 'Windows: „Zeigerbeschleunigung verbessern“ aus',
           'Maus-DPI überall gleich lassen', 'Werte gelten für normales Zielen (Hipfire), nicht für Visier/Scope', 'Der Sens-Assistent setzt diesen Wert automatisch']
@@ -718,6 +872,7 @@ function pageSens(el) {
     $('sCards').querySelectorAll('[data-card]').forEach((card) => {
       const id = card.dataset.card, g = gameById(id);
       const msg = card.querySelector('[data-cal-msg]');
+      if (!card.querySelector('[data-cal-save]')) return; // Spiele mit eigener cm/360°-Anzeige brauchen keine Kalibrierung
       card.querySelector('[data-cal-save]').onclick = () => {
         const sens = parseNum(card.querySelector('[data-cal-sens]').value);
         const measured = parseNum(card.querySelector('[data-cal-cm]').value);
@@ -751,6 +906,7 @@ function pageSens(el) {
     saveSettings(); render();
   };
   $('sDpiCheck').onclick = (e) => { e.preventDefault(); mouseCheck(render); };
+  bindShownImport(el, render);
   $('sSens').oninput = (e) => { const v = parseNum(e.target.value); if (v > 0) { S.sens = v; saveSettings(); draw(); } };
   $('sDpi').oninput = (e) => { const v = parseNum(e.target.value); if (v > 0) { S.dpi = v; saveSettings(); draw(); } };
   el.querySelectorAll('[data-g]').forEach((c) => (c.onchange = () => {
@@ -775,8 +931,10 @@ function mergeSummaries(list) {
   const valid = list.filter((r) => r && r.flicks > 0 && isFinite(r.ratio));
   const W = valid.reduce((s, r) => s + r.flicks, 0);
   if (!W) return null;
-  const w = (k) => valid.reduce((s, r) => s + r[k] * r.flicks, 0) / W;
-  return { flicks: W, ratio: w('ratio'), overshootRate: w('overshootRate'), undershootRate: w('undershootRate') };
+  const w = (k) => valid.reduce((s, r) => s + (isFinite(r[k]) ? r[k] : 0) * r.flicks, 0) / W;
+  const sum = (k) => valid.reduce((s, r) => s + (r[k] || 0), 0);
+  return { flicks: W, ratio: w('ratio'), overshootRate: w('overshootRate'), undershootRate: w('undershootRate'), corrections: w('corrections'),
+    missClicks: sum('missClicks'), missOver: sum('missOver'), missEarly: sum('missEarly'), missShort: sum('missShort'), missSide: sum('missSide') };
 }
 
 /** empfohlener Wert: kombiniert aus mehreren Durchläufen, sonst der letzte */
@@ -807,7 +965,7 @@ function wizSetup(el) {
           <div><label>Sensitivität dort</label><input id="wSens" type="text" inputmode="decimal" value="${S.sens}"></div>
           <div><label>Maus-DPI</label><input id="wDpi" type="text" inputmode="numeric" value="${S.dpi}"></div>
         </div>
-        <p style="margin:14px 0 0" class="muted">Entspricht <b id="wCm" style="color:var(--text)"></b></p></div>
+        <p style="margin:14px 0 0" class="muted">Entspricht <b id="wCm" style="color:var(--text)"></b></p>${shownImportHtml()}</div>
       <div class="card"><h3>${icon('mouse', 18)} Deine Maus</h3>
         <p class="muted"><small>Die DPI-Angabe des Herstellers weicht oft einige Prozent ab. Für den Test selbst ist das egal – für die cm-Angaben und
         die Kalibrierung von Spielen wie Battlefield 6 aber nicht. Die Mausprüfung misst sie mit einem Lineal nach und prüft Raw Input.</small></p>
@@ -828,6 +986,7 @@ function wizSetup(el) {
   $('wSens').oninput = (e) => { const v = parseNum(e.target.value); if (v > 0) { S.sens = v; saveSettings(); upd(); } };
   $('wDpi').oninput = (e) => { const v = parseNum(e.target.value); if (v > 0) { S.dpi = v; S.dpiMeasured = false; saveSettings(); upd(); } };
   $('wCheck').onclick = () => mouseCheck(render);
+  bindShownImport(el, render);
   el.querySelectorAll('[data-g]').forEach((c) => (c.onchange = () => {
     c.parentElement.classList.toggle('on', c.checked);
     S.myGames = c.checked ? [...new Set([...S.myGames, c.dataset.g])] : S.myGames.filter((x) => x !== c.dataset.g);
@@ -848,7 +1007,7 @@ function wizPrep(el) {
     <div class="grid2">
       ${[['crosshair', 'Blindtest', 'Pro Runde spielst du zwei Kandidaten A und B. Welche Sensitivität gerade aktiv ist, siehst du nicht – so entscheidet deine Leistung, nicht dein Kopf.'],
         ['zap', 'Flicks + Tracking', `Jeder Kandidat: ${L.flick} s Ziele in 5–40° Entfernung, dann ${L.track} s ein bewegtes Ziel verfolgen. Beides zählt.`],
-        ['refresh-cw', 'Eingrenzen', `Der Bessere bleibt, der Bereich halbiert sich – ${S.finderRounds} Runden. Bei Gleichstand wird das Paar automatisch wiederholt.`]]
+        ['refresh-cw', 'Eingrenzen', `Der Bessere bleibt, der Bereich halbiert sich – ${S.finderRounds} Runden. Ist es zu knapp (unter 3,5 %), wird das Paar wiederholt.`]]
         .map(([ic, t, d]) => `<div class="card"><h3 style="color:var(--accent)">${icon(ic, 18)}<span style="color:var(--text)">${t}</span></h3><p class="muted" style="margin:0"><small>${d}</small></p></div>`).join('')}
     </div>
     <div class="card" style="margin-top:14px"><div class="grid2">
@@ -912,44 +1071,51 @@ function wizPair(el) {
   const f = wiz.finder;
   const v = f.verdict();
   const bar = `<div class="progress"><div style="width:${(f.round / f.rounds) * 100}%"></div></div>`;
-  if (v.needsRepeat) {
+  const labelOf = (idx) => (f.order[0] === idx ? 'A' : 'B');
+  const last = f.round + 1 >= f.rounds;
+  const go = (idx, how) => { f.choose(idx, how); if (f.done) finishWizard(); else runNextTest(); };
+  if (v.tie) {
+    // zu knapp: Wiederholung verlangen, aber „trotzdem den Besseren nehmen“ erlauben
     el.innerHTML = head('Sens-Assistent') + stepsBar(2) + bar + `
-      <div class="card warn"><h3>${icon('refresh-cw', 18)} Kopf-an-Kopf-Rennen</h3>
-        <p class="muted">A und B liegen nur ${n(v.diff * 100, 1)} % auseinander – das ist im Bereich des Messrauschens. Damit der Zufall nicht entscheidet,
-        wird dieses Paar noch einmal getestet (in umgekehrter Reihenfolge).</p>
-        <button class="primary" id="wRep">${icon('play', 16)} Wiederholung starten</button></div>`;
+      <div class="card warn"><h3>${icon('refresh-cw', 18)} Zu knapp für eine sichere Entscheidung</h3>
+        <p class="muted">Runde ${f.round + 1}: A und B liegen nur <b style="color:var(--text)">${n(v.diff * 100, 1)} %</b> auseinander – das ist im Bereich des
+        Messrauschens (Grenze ${n(TIE_LIMIT * 100, 1)} %). ${v.repeats ? `Bisher ${v.repeats}× wiederholt, alle Durchgänge werden gemittelt.` : 'Bei einer Wiederholung werden alle Durchgänge gemittelt.'}</p>
+        <div class="vs" style="margin:14px 0">${[f.order[0], f.order[1]].map((idx) => `<div class="card" style="cursor:default"><div class="row" style="justify-content:space-between">
+          <h3 style="margin:0">Test ${labelOf(idx)}</h3>${idx === v.winner ? `<span class="badge">knapp vorn</span>` : ''}</div>
+          <div class="big" style="margin-top:6px">${Math.round(v.scores[idx] * 100)}</div><small>Wertung (100 = Durchschnitt beider)</small></div>`).join('')}</div>
+        <div class="row"><button class="primary lg" id="wRep">${icon('play', 18)} Paar wiederholen (empfohlen)</button>
+          <button class="lg" id="wTake">Trotzdem Test ${labelOf(v.winner)} nehmen</button></div>
+        <p class="muted" style="margin:12px 0 0"><small>„Trotzdem nehmen“ übernimmt den knapp besseren Test. Das geht schneller, ist bei so kleinem Abstand aber eher Zufall –
+        im Ergebnis wird die Runde entsprechend gekennzeichnet.</small></p></div>
+      <div class="row" style="margin-top:14px"><button class="ghost" id="wPause">${icon('pause', 16)} Pause</button></div>`;
     $('wRep').onclick = () => { f.repeat(); runNextTest(); };
+    $('wTake').onclick = () => go(v.winner, 'forced');
+    $('wPause').onclick = () => { wiz.step = 'paused'; render(); };
     return;
   }
   let sel = v.winner;
-  const labelOf = (idx) => (f.order[0] === idx ? 'A' : 'B');
   const avg = (rs, fn) => rs.reduce((a, x) => a + fn(x), 0) / rs.length;
   const card = (idx) => {
     const rs = f.results[idx];
     return `<div class="card ${idx === sel ? 'sel' : ''}" data-idx="${idx}">
-      <div class="row" style="justify-content:space-between"><h3 style="margin:0">Test ${labelOf(idx)}</h3>${idx === v.winner && !v.tie ? `<span class="badge ok">${icon('trophy', 12)} besser</span>` : ''}</div>
+      <div class="row" style="justify-content:space-between"><h3 style="margin:0">Test ${labelOf(idx)}</h3>${idx === v.winner ? `<span class="badge ok">${icon('trophy', 12)} besser</span>` : ''}</div>
       <div class="big" style="margin-top:8px">${Math.round(v.scores[idx] * 100)}</div><small>Wertung (100 = Durchschnitt beider)</small>
       <div class="stats" style="grid-template-columns:1fr 1fr;margin-bottom:0">
         ${stat('Ziele pro Sekunde', n(avg(rs, (x) => (x.flick.kills ?? x.flick.hits) / x.flick.duration), 2))}
         ${stat('Genauigkeit', n(avg(rs, (x) => x.flick.acc), 1) + ' %')}
         ${stat('Tracking am Ziel', n(avg(rs, (x) => x.track.onTarget), 1) + ' %')}
-        ${stat('Überschießer', pct(avg(rs, (x) => x.flick.overshootRate || 0)))}</div></div>`;
+        ${stat('Über das Ziel hinaus', pct(avg(rs, (x) => x.flick.overshootRate || 0)))}</div></div>`;
   };
-  const last = f.round + 1 >= f.rounds;
   const draw = () => {
     el.innerHTML = head('Sens-Assistent') + stepsBar(2) + bar + `
-      <h3>Runde ${f.round + 1} von ${f.rounds}</h3>
-      <p class="muted">${v.tie ? 'Auch nach der Wiederholung praktisch gleichauf. Wähle den Test, der sich <b>besser angefühlt</b> hat.' :
-        'Vorgeschlagen ist der Test mit der besseren Wertung. Hat sich der andere klar besser angefühlt, kannst du ihn anklicken.'}</p>
+      <h3>Runde ${f.round + 1} von ${f.rounds}${v.repeats ? ` <span class="badge">${v.repeats}× wiederholt</span>` : ''}</h3>
+      <p class="muted">Vorgeschlagen ist der Test mit der besseren Wertung (Abstand ${n(v.diff * 100, 1)} %). Hat sich der andere klar besser angefühlt, kannst du ihn anklicken.</p>
       <div class="vs">${[f.order[0], f.order[1]].map(card).join('')}</div>
       <div class="row" style="justify-content:space-between"><button class="ghost" id="wPause">${icon('pause', 16)} Pause</button>
         <button class="primary lg" id="wNext">${last ? `${icon('sparkles', 18)} Ergebnis berechnen` : `Weiter mit Test ${labelOf(sel)} ${icon('arrow-right', 18)}`}</button></div>`;
     el.querySelectorAll('.vs .card').forEach((c) => (c.onclick = () => { sel = +c.dataset.idx; draw(); }));
     $('wPause').onclick = () => { wiz.step = 'paused'; render(); };
-    $('wNext').onclick = () => {
-      f.choose(sel, v.tie ? 'feel' : sel === v.winner ? 'score' : 'override');
-      if (f.done) finishWizard(); else runNextTest();
-    };
+    $('wNext').onclick = () => go(sel, sel === v.winner ? 'score' : 'override');
   };
   draw();
 }
@@ -969,6 +1135,13 @@ function finishWizard() {
 
 function resultGameCard(g, cm) {
   const yaw = yawFor(g);
+  if (g.shows) {
+    const main = mainShown(g, cm);
+    return `<div class="card gamecard"><div class="row" style="justify-content:space-between"><h3 style="margin:0">${esc(shortName(g))}</h3><span class="badge ok">exakt</span></div>
+      <div class="val" style="margin:10px 0 2px">${main.text} cm</div>
+      <small>Regler verschieben, bis in der Zeile „${dpiFmt(main.dpi)} DPI“ ${main.inch} Zoll / ${main.text} cm steht.<br>${esc(g.where)}</small>
+      <p class="muted" style="margin:10px 0 0;font-size:12.5px">${shownTargets(g, cm).filter((t) => t.dpi !== main.dpi).map((t) => `${dpiFmt(t.dpi)} DPI: ${t.text} cm`).join(' · ')}</p></div>`;
+  }
   if (!yaw) {
     return `<div class="card gamecard"><h3>${esc(g.name)}</h3><p class="muted"><small>Für dieses Spiel gibt es keinen verlässlichen Umrechnungswert.
       Unter „Meine Spiele“ kannst du es mit einem 360°-Test kalibrieren – danach steht hier dein Wert.</small></p>
@@ -994,7 +1167,7 @@ function wizResult(el) {
   const refYaw = yawFor(refG) || curYaw();
   const games = S.myGames.map(gameById);
   const hrows = hist.map((h) => `<tr><td>${h.round}</td>${[0, 1].map((i) => `<td class="num">${h.winner === i ? `<b style="color:var(--accent)">` : ''}${n(f.cm360Of(h.pair[i]), 1)} cm · ${Math.round(h.scores[i] * 100)}${h.winner === i ? '</b>' : ''}</td>`).join('')}
-    <td>${{ score: 'Wertung', feel: 'Gefühl (Gleichstand)', override: 'Gefühl (überstimmt)' }[h.how]}</td></tr>`).join('');
+    <td>${{ score: 'Wertung', feel: 'Gefühl (Gleichstand)', override: 'Gefühl (überstimmt)', forced: 'knapp – trotzdem genommen' }[h.how]}${h.repeats ? ` · ${h.repeats}× wiederholt` : ''}</td></tr>`).join('');
   el.innerHTML = head('Dein Ergebnis', 'Das sind die Werte, die du in deinen Spielen einträgst.') + stepsBar(3) + `
     <div class="card hero">
       <div class="grid2" style="align-items:end">
@@ -1041,7 +1214,7 @@ function pageHome(el) {
   const cm = curCm();
   const prof = profiles[profiles.length - 1];
   const recent = history.filter((r) => MODES[r.mode] && !MODES[r.mode].hidden).slice(-5).reverse();
-  const top = S.myGames.map(gameById).filter((g) => yawFor(g)).slice(0, 4);
+  const top = S.myGames.map(gameById).filter((g) => yawFor(g) || g.shows).slice(0, 5);
   const hour = new Date().getHours();
   const hello = hour < 11 ? 'Guten Morgen' : hour < 18 ? 'Hallo' : 'Guten Abend';
   const hero = !sensRuns.length
@@ -1055,7 +1228,7 @@ function pageHome(el) {
         <div><label>Deine Sensitivität</label><div class="big" style="font-size:48px">${n(cm, 1)} <span style="font-size:20px;color:var(--text2)">cm/360°</span></div>
           <p class="muted" style="margin:0">${rec && Math.abs(rec.cm360 / cm - 1) > 0.03 ? `Assistent empfiehlt ${n(rec.cm360, 1)} cm/360° – <a href="#" id="hShow">ansehen</a>` : `${esc(shortName(gameById(S.game)))} ${fmtSens(S.sens)} · ${S.dpi} DPI`}</p>
           ${rec ? `<p style="margin:10px 0 0"><span class="badge ${rec.level === 'warn' ? 'warn' : rec.count >= 2 ? 'ok' : ''}">${rec.count >= 2 ? `${rec.count} Durchläufe · ${rec.level === 'warn' ? 'schwankt' : 'stabil'}` : '1 Durchlauf'}</span></p>` : ''}</div>
-        <div>${top.map((g) => { const st = settingFor(g, yawFor(g), cm, S.dpi); return `<div class="row" style="justify-content:space-between;padding:7px 0;border-bottom:1px solid var(--line)"><span class="muted">${esc(shortName(g))}</span><b style="font-variant-numeric:tabular-nums">${st.text}</b></div>`; }).join('')}
+        <div>${top.map((g) => { const st = g.shows ? { text: `${mainShown(g, cm).text} cm <small>(${mainShown(g, cm).dpi} DPI)</small>` } : settingFor(g, yawFor(g), cm, S.dpi); return `<div class="row" style="justify-content:space-between;padding:7px 0;border-bottom:1px solid var(--line)"><span class="muted">${esc(shortName(g))}</span><b style="font-variant-numeric:tabular-nums">${st.text}</b></div>`; }).join('')}
           <div class="row" style="margin-top:14px"><button id="hGames">${icon('gamepad-2', 16)} Alle Spiele</button><button class="ghost" id="hWiz">${icon('refresh-cw', 16)} Erneut testen</button></div></div>
       </div></div>`;
   const tile = (id, ic, title, text) => `<div class="card click" id="${id}"><h3 style="color:var(--accent)">${icon(ic, 20)}</h3><h3 style="margin-bottom:4px">${title}</h3><p class="muted" style="margin:0"><small>${text}</small></p></div>`;
@@ -1145,7 +1318,8 @@ function progressChart(box, runs, metric) {
 /** Eintrag aus einer Import-Datei auf bekannte Felder und Zahlen reduzieren */
 const RUN_NUM = ['date', 'duration', 'score', 'acc', 'hits', 'shots', 'kps', 'flicks', 'avgTtk', 'reaction', 'ratio',
   'overshootRate', 'undershootRate', 'correction', 'onTarget', 'cm360', 'sensInGame',
-  'kills', 'reactionMedian', 'reactionBest', 'early', 'missedTargets', 'switchTime', 'switches'];
+  'kills', 'reactionMedian', 'reactionBest', 'early', 'missedTargets', 'switchTime', 'switches',
+  'cleanRate', 'corrections', 'efficiency', 'missClicks', 'missOver', 'missEarly', 'missShort', 'missSide'];
 function cleanRun(r) {
   if (!r || typeof r !== 'object' || !(MODES[r.mode] || r.mode === 'finderResult')) return null;
   const out = { mode: r.mode };
@@ -1250,6 +1424,7 @@ function pageStats(el) {
     const date = +tr.dataset.date;
     const r = { ...history.find((h) => h.date === date) };
     r.shotLog = loadDetails(date);
+    r.paths = loadPaths(date);
     const row = document.createElement('tr');
     row.className = 'detail';
     row.innerHTML = `<td colspan="5"><div class="detailbox"></div></td>`;
@@ -1288,6 +1463,7 @@ function pageStats(el) {
       for (const [k, v] of Object.entries(data.details)) {
         if (/^\d+$/.test(k) && v && Array.isArray(v.s) && v.s.every((x) => Array.isArray(x) && x.length === 6 && x.every((y) => y === null || typeof y === 'number'))) {
           imp[k] = { t: v.t ? 1 : 0, s: v.s };
+          if (Array.isArray(v.p) && v.p.every((w) => Array.isArray(w) && w.every((y) => typeof y === 'number'))) imp[k].p = v.p;
         }
       }
       const d = { ...imp, ...load(DETAIL_KEY, {}) };

@@ -3,7 +3,8 @@
 // Start mit 0,5× und 1,5× der aktuellen Sensitivität. Jeder Kandidat wird mit einem Flick-Teil
 // (Ziele in 5–40° Entfernung) und einem Tracking-Teil getestet. Der bessere Kandidat bleibt, der andere
 // wird durch die Mitte beider ersetzt – der Bereich halbiert sich pro Runde.
-// Liegen beide innerhalb des Messrauschens (TIE), wird das Paar einmal wiederholt.
+// Liegen beide innerhalb des Messrauschens (TIE), wird eine Wiederholung verlangt (Ergebnisse werden gemittelt);
+// wer nicht wiederholen will, kann trotzdem den knapp Besseren nehmen.
 
 export const TEST_LENGTHS = {
   short: { name: 'Kurz', flick: 15, track: 10 },
@@ -11,6 +12,7 @@ export const TEST_LENGTHS = {
   long: { name: 'Gründlich', flick: 28, track: 18 },
 };
 const TIE = 0.035;        // < 3,5 % Unterschied gilt als Gleichstand
+export const TIE_LIMIT = TIE;
 const W_FLICK = 0.6, W_TRACK = 0.4;
 
 /** Flick-Leistung: Ziele pro Sekunde, mit Genauigkeit gewichtet */
@@ -37,7 +39,7 @@ export class SensFinder {
     this.order = Math.random() < 0.5 ? [0, 1] : [1, 0];
     this.step = 0;
     this.results = [[], []]; // pro Kandidat: [{ flick, track }]
-    this.repeated = false;
+    this.repeats = 0;
   }
 
   /** nächster Test der Runde oder null, wenn das Paar fertig ist */
@@ -61,25 +63,26 @@ export class SensFinder {
     return [0, 1].map((i) => W_FLICK * (f[i] / mf) + W_TRACK * (t[i] / mt));
   }
 
-  /** { winner, diff, tie, needsRepeat } für das aktuelle Paar */
+  get repeated() { return this.repeats > 0; }
+
+  /** { winner, diff, tie } für das aktuelle Paar – tie: zu knapp, Wiederholung nötig */
   verdict() {
     const s = this.scores();
     const winner = s[1] > s[0] ? 1 : 0;
     const diff = Math.abs(s[0] - s[1]);
-    const tie = diff < TIE;
-    return { scores: s, winner, diff, tie, needsRepeat: tie && !this.repeated };
+    return { scores: s, winner, diff, tie: diff < TIE, repeats: this.repeats };
   }
 
   /** Gleichstand: das Paar noch einmal testen (Ergebnisse werden gemittelt) */
   repeat() {
-    this.repeated = true;
+    this.repeats++;
     this.step = 0;
     this.order = [this.order[1], this.order[0]];
   }
 
   choose(winnerIdx, how = 'score') {
     const w = this.pair[winnerIdx], l = this.pair[1 - winnerIdx];
-    this.history.push({ round: this.round + 1, pair: [...this.pair], results: this.results.map((r) => [...r]), scores: this.scores(), winner: winnerIdx, how });
+    this.history.push({ round: this.round + 1, pair: [...this.pair], results: this.results.map((r) => [...r]), scores: this.scores(), winner: winnerIdx, how, repeats: this.repeats });
     this.pair = [w, (w + l) / 2];
     this.round++;
     this.winnerMult = w;

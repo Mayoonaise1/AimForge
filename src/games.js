@@ -39,9 +39,11 @@ export const GAMES = [
   },
   {
     id: 'bf6', name: 'Battlefield 6', yaw: null, decimals: 2,
-    where: 'Einstellungen → Steuerung → Maus: Empfindlichkeit für Soldaten (Hipfire)',
-    notes: 'EA veröffentlicht keinen Umrechnungswert und die Community-Formeln widersprechen sich. ' +
-      'Deshalb einmal per 360°-Test kalibrieren und danach mit dem neuen Wert noch einmal nachmessen.',
+    // BF6 zeigt unter dem Regler selbst an, wie viele cm eine 360°-Drehung bei diesen DPI braucht
+    shows: { dpis: [800, 1600, 3200], step: 0.1 },
+    where: 'Einstellungen → Maus → „Zielempfindlichkeit – Infanterie (Maus)“',
+    notes: 'Das Spiel zeigt unter dem Regler die cm für eine 360°-Drehung bei 800/1.600/3.200 DPI an. ' +
+      'Regler verschieben, bis dort der Wert von AimForge steht – feinjustieren mit den Pfeiltasten.',
   },
   {
     id: 'wardogs', name: 'Wardogs', yaw: null, estimate: 0.0314, decimals: 2,

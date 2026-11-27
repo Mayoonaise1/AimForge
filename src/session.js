@@ -1,4 +1,4 @@
-import { analyzeEngagement, summarize } from './analysis.js';
+import { analyzePath, summarize, pathsOf } from './analysis.js';
 
 const rand = (a, b) => a + Math.random() * (b - a);
 const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
@@ -206,16 +206,18 @@ export class Session {
     if (this.mode.type !== 'click') return;
     this.shots++;
     const hit = this.engine.pick();
-    this._logShot(t, hit);
+    const near = this._logShot(t, hit);
+    // Weg-Analyse: der ganze Weg seit dem letzten Treffer bzw. seit das Ziel erschien – auch bei Fehlschüssen.
+    // Nur der Anflug auf ein frisches Ziel ist ein Flick (bei Panzerzielen nicht die Folgetreffer).
+    const target = hit || near;
+    const fresh = target && (!target.hp || target.hp === this.mode.hp);
+    if (fresh && this.mode.flickAnalysis !== false) {
+      const t0 = Math.max(this.lastHitTime, target.born);
+      this.engagements.push(analyzePath(this.samples, t0, t, this._viewAt(t0), target, target.radiusDeg, !!hit));
+    }
     if (!hit) { this.sound?.('miss'); return; }
     this.hits++;
-    const fresh = !hit.hp || hit.hp === this.mode.hp;
-    // Erfassung beginnt beim letzten Treffer bzw. beim Erscheinen des Ziels; nur der erste Treffer eines Ziels ist ein Flick
-    if (fresh) {
-      const t0 = Math.max(this.lastHitTime, hit.born);
-      if (this.mode.flickAnalysis === false) this.engagements.push({ dist: 0, ttk: t - t0, flick: false });
-      else this.engagements.push(analyzeEngagement(this.samples, t0, t, this._viewAt(t0), hit, hit.radiusDeg));
-    }
+    if (fresh && this.mode.flickAnalysis === false) this.engagements.push({ dist: 0, ttk: t - Math.max(this.lastHitTime, hit.born), flick: false });
     this.lastHitTime = t;
     if (hit.hp && --hit.hp > 0) {
       this.sound?.('tick');
@@ -261,7 +263,7 @@ export class Session {
       let best = Infinity;
       for (const tg of e.targets) { const a = e.angleTo(tg); if (a < best) { best = a; near = tg; } }
     }
-    if (!near) return;
+    if (!near) return null;
     // bei bewegten Zielen ist die Richtung, in die das Ziel läuft, aussagekräftiger als der Anlaufweg
     let ux = null, uy = null;
     if (near.motion) {
@@ -273,6 +275,7 @@ export class Session {
       if (md > near.radiusDeg * 2) { ux = mx / md; uy = my / md; } // sonst Zufallsrauschen
     }
     this.shotLog.push({ dx: e.x - near.x, dy: e.y - near.y, r: near.radiusDeg, hit: !!hit, ux, uy, moving: !!near.motion });
+    return near;
   }
 
   _viewAt(t) {
@@ -380,6 +383,7 @@ export class Session {
       hits: this.hits, shots: this.shots, kills: this.kills,
       kps: this.kills / (this.duration / 1000),
       ...summarize(this.engagements),
+      paths: pathsOf(this.engagements),
     };
   }
 }
