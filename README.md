@@ -1,41 +1,56 @@
-# AimForge – Aim-Trainer mit Sensitivitäts-Finder
+# AimForge
 
-Browser-basierter Aim-Trainer (Three.js).
+**Aim-Trainer für Windows mit Sens-Assistent:** findet im Blindtest deine optimale Mausempfindlichkeit
+und sagt dir, welchen Wert du in jedem deiner Spiele eintragen musst.
 
-**Online spielen:** https://mayoonaise1.github.io/AimForge/ (nach Aktivierung von GitHub Pages)
+## Download
 
-Offline: Die fertige App ist **eine einzige Datei**: `dist/AimForge.html`
-→ einfach in Chrome oder Edge öffnen (Doppelklick), kein Server nötig.
+Die Windows-Version gibt es auf der **[Release-Seite](https://github.com/Mayoonaise1/AimForge/releases/latest)**:
+
+- `AimForge-Setup-<version>.exe` – Installer mit Startmenü- und Desktop-Verknüpfung
+- `AimForge-<version>-portable.exe` – ohne Installation, einfach starten
+
+Beim ersten Start zeigt Windows eventuell „Der Computer wurde durch Windows geschützt“, weil die App nicht
+kostenpflichtig signiert ist: *Weitere Informationen → Trotzdem ausführen*.
+
+Eine Web-Version läuft zusätzlich unter https://mayoonaise1.github.io/AimForge/ (sofern GitHub Pages aktiviert ist).
 
 ## Funktionen
-- **Training** in vier Kategorien – Ziel getroffen → neues Ziel erscheint:
-  - *Klicken*: Raster (3 Ziele), Flick, Mikro, Panzerziele (3 Treffer pro Ziel)
-  - *Bewegte Ziele*: Ausweichen (seitlich laufende Ziele mit plötzlichen Richtungswechseln)
-  - *Tracking*: Tracking, Zielwechsel (3 Ziele, das leuchtende verfolgen, Umschaltzeit wird gemessen)
-  - *Reaktion*: Ziel blitzt auf → so schnell wie möglich treffen, zu frühes Klicken kostet Punkte
-- **Aufwärmen**: 2-Minuten-Playlist über alle Szenarien, optional direkt vor dem Sens-Finder
-- **Bewegungsanalyse** nach jeder Runde: Reaktionszeit, Überschießen/Unterschießen, Korrekturzeit
-- **Trefferbild** nach jeder Runde: Zielscheibe mit allen Einschüssen (Bildschirm- oder Bewegungsrichtungs-Ansicht),
-  Abstand zur Mitte, Streuung, mittlere Abweichung, Fehlschüsse zu kurz/zu weit; beim Tracking Vorhalt/Nachlauf
-- **Sensitivitäts-Finder**: Blindtests im Paarvergleich, der Bereich wird pro Runde enger,
-  danach Feinjustierung anhand deines Bewegungsmusters
-- **Sensitivität**: dein Wert als cm/360° und welcher Wert in welchem Spiel einzutragen ist
-  (CS2, Valorant, Apex, Overwatch 2, CoD, Fortnite, Battlefield 6, Wardogs, TF2, Quake, Titanfall 2, eigenes Spiel),
-  inkl. Rundung des Spielmenüs, DPI-Tipp, Konsolenbefehlen und Spickzettel-Export
-- **Kalibrierung per 360°-Test**: Für Spiele ohne verlässlichen Umrechnungswert (z. B. Battlefield 6, Wardogs)
-  einmal mit dem Lineal nachmessen – das Tool lernt daraus die Umrechnung des Spiels
-- **Fähigkeitsprofil**: fester Testlauf (6 × 30 s) für Flick-Tempo, Präzision, bewegte Ziele, Tracking, Umschalten und Reaktion;
-  Bewertung 0–100 (Orientierungswerte), Vergleich mit früheren Profilen, Fokus-Training für die schwächste Fähigkeit
-- **Fortschrittsdiagramme** pro Szenario (Punkte oder Genauigkeit, gleitender Durchschnitt, Trendaussage)
-- **Mausprüfung**: Raw Input, Abfragerate, Touchpad-Erkennung und DPI-Messung mit dem Lineal
-- **Statistik**: Bestwerte, Durchschnitt, Verlauf (gespeichert im Browser), Export und Import;
-  jede Runde aufklappbar mit kompletter Auswertung, Trefferbild für die letzten 60 Runden
-- Raw Input (ohne OS-Mausbeschleunigung), einstellbares FOV und Fadenkreuz
+
+- **Sens-Assistent** – geführt in 4 Schritten (Einrichtung, Vorbereitung, Blindtest, Ergebnis):
+  - Paarvergleich im Blindtest, jeder Kandidat mit Flick-Teil (5–40°) **und** Tracking-Teil
+  - der Bereich halbiert sich pro Runde; bei Gleichstand (< 3,5 %) wird das Paar automatisch wiederholt
+  - Feinjustierung über die Bewegungsanalyse (Über-/Unterschießen)
+  - mehrere Durchläufe werden kombiniert (Median) und als „stabil / schwankt“ bewertet
+  - Ergebnis: Wert pro Spiel inkl. Rundung des Spielmenüs, Einstellungsort, Konsolenbefehl, Spickzettel
+- **Meine Spiele** – cm/360° ↔ CS2, Valorant, Apex, Overwatch 2, CoD, Fortnite, Battlefield 6, Wardogs, TF2, Quake,
+  Titanfall 2, eigenes Spiel; Kalibrierung per 360°-Test für Spiele ohne bekannten Umrechnungswert; DPI-Tipp
+- **Training** – Klicken (Raster, Flick, Mikro, Panzerziele), bewegte Ziele (Ausweichen), Tracking (Tracking, Zielwechsel),
+  Reaktion; Aufwärm-Playlist; Trefferbild und Bewegungsanalyse nach jeder Runde
+- **Fähigkeitsprofil** – 6 × 30 s Testlauf, Stärken/Schwächen, Fokus-Training für die schwächste Fähigkeit
+- **Statistik** – Fortschrittsdiagramme, aufklappbare Runden mit Trefferbild, Export/Import
+- **Mausprüfung** – Raw Input, Abfragerate, Touchpad-Erkennung, DPI-Messung mit dem Lineal
+- Windows-App: eigene Fensterleiste, Raw Input (ohne Windows-Beschleunigung), keine Bildratenbegrenzung, F11 = Vollbild
 
 ## Entwickeln
+
 ```
 npm install
-npm run build      # erzeugt dist/AimForge.html
+npm run app        # Web-Teil bauen und als Desktop-App starten
+npm run build      # nur dist/AimForge.html bauen (läuft auch im Browser)
+npm run dist:win   # Windows-Installer + portable .exe bauen (unter Windows)
+npm run icons      # App-Icons aus build/icon.svg erzeugen
 ```
-Code in `src/`: `engine.js` (3D/Eingabe), `session.js` (Szenarien), `analysis.js` (Auswertung),
-`finder.js` (Sens-Finder), `profile.js` (Fähigkeitsprofil), `games.js` (Spiele & Umrechnung), `main.js` (Oberfläche).
+
+Der offizielle Windows-Build läuft über GitHub Actions (`.github/workflows/windows-release.yml`):
+ein Tag wie `v2.0.1` pushen → Installer und portable Version erscheinen auf der Release-Seite.
+
+Aufbau:
+
+- `electron/` – Hauptprozess (Fenster, Raw-Input-Schalter) und Preload-Brücke
+- `src/main.js` – Oberfläche und Seiten · `src/ui.js` – Dialoge/Hinweise · `src/icons.js` – Icons (Lucide, ISC)
+- `src/engine.js` – 3D-Szene und Mauseingabe · `src/session.js` – Szenarien · `src/analysis.js` – Auswertung
+- `src/finder.js` – Sens-Test und Kombination mehrerer Durchläufe · `src/profile.js` – Fähigkeitsprofil
+- `src/games.js` – Spiele, Umrechnung, Rundung
+
+Schrift: Inter (SIL Open Font License), eingebettet.

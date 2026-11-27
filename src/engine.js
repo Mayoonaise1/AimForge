@@ -22,6 +22,7 @@ export class Engine {
     this.degPerCount = 0.022;
     this.locked = false;
     this.targets = new Set();
+    this.effects = [];
     this.onLook = null;
     this.onShoot = null;
     this.onMouseUp = null;
@@ -150,7 +151,8 @@ export class Engine {
     const mesh = new THREE.Mesh(this.targetGeo, mat);
     const r = TARGET_DIST * Math.sin(radiusDeg * DEG);
     mesh.scale.setScalar(r);
-    const t = { mesh, x, y, radiusDeg, ...data };
+    const t = { mesh, x, y, radiusDeg, size: r, shown: performance.now(), ...data };
+    mesh.scale.setScalar(r * 0.55);
     this.moveTarget(t, x, y);
     this.scene.add(mesh);
     this.targets.add(t);
@@ -163,6 +165,17 @@ export class Engine {
     t.mesh.position.copy(Engine.dirOf(x, y).multiplyScalar(TARGET_DIST)).add(new THREE.Vector3(0, 1.6, 0));
   }
 
+  /** Treffer-Effekt: Ring dehnt sich aus und verblasst (rein optisch) */
+  burst(t) {
+    this.ringGeo ??= new THREE.RingGeometry(0.82, 1, 48);
+    const mat = new THREE.MeshBasicMaterial({ color: t.mesh.material.color.clone(), transparent: true, opacity: 0.85, side: THREE.DoubleSide, depthWrite: false });
+    const m = new THREE.Mesh(this.ringGeo, mat);
+    m.position.copy(t.mesh.position);
+    m.lookAt(0, 1.6, 0);
+    this.scene.add(m);
+    this.effects.push({ m, born: performance.now(), s: t.size || t.mesh.scale.x });
+  }
+
   removeTarget(t) {
     this.scene.remove(t.mesh);
     t.mesh.material.dispose();
@@ -171,6 +184,8 @@ export class Engine {
 
   clearTargets() {
     for (const t of [...this.targets]) this.removeTarget(t);
+    for (const f of this.effects) { this.scene.remove(f.m); f.m.material.dispose(); }
+    this.effects = [];
   }
 
   /** Winkel (Grad) zwischen Blickrichtung und Zielmitte */
@@ -191,6 +206,22 @@ export class Engine {
   }
 
   render() {
+    const now = performance.now();
+    // neue Ziele „ploppen“ in 90 ms auf volle Größe (die Trefferprüfung nutzt immer die volle Größe)
+    for (const t of this.targets) {
+      if (t.shown && t.size) {
+        const k = Math.min(1, (now - t.shown) / 90);
+        t.mesh.scale.setScalar(t.size * (0.55 + 0.45 * (1 - (1 - k) ** 3)));
+        if (k >= 1) t.shown = 0;
+      }
+    }
+    this.effects = this.effects.filter((f) => {
+      const k = (now - f.born) / 200;
+      if (k >= 1) { this.scene.remove(f.m); f.m.material.dispose(); return false; }
+      f.m.scale.setScalar(f.s * (1 + k * 1.1));
+      f.m.material.opacity = 0.85 * (1 - k) ** 2;
+      return true;
+    });
     this.camera.position.set(0, 1.6, 0);
     this.camera.rotation.set(this.y * DEG, -this.x * DEG, 0);
     this.renderer.render(this.scene, this.camera);

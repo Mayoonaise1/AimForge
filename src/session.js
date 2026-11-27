@@ -225,6 +225,7 @@ export class Session {
     this.sound?.('hit');
     this.kills++;
     this.lastKill = { x: hit.x, y: hit.y };
+    this.engine.burst(hit);
     this.engine.removeTarget(hit);
     this._spawn(t);
   }
@@ -246,6 +247,7 @@ export class Session {
     this.reactions.push(rt);
     this.points += Math.round(100000 / Math.max(120, rt));
     this.sound?.('hit');
+    this.engine.burst(hit);
     this.engine.removeTarget(hit);
     this.lastHitTime = t;
     this.nextAt = t + rand(900, 2600);

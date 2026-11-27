@@ -1,6 +1,8 @@
 import { Engine } from './engine.js';
+import { icon } from './icons.js';
+import { confirmDialog, toast } from './ui.js';
 import { Session, MODES, CATEGORIES } from './session.js';
-import { SensFinder } from './finder.js';
+import { SensFinder, TEST_LENGTHS, combineRuns } from './finder.js';
 import { biasAdvice, shotStats, shotAdvice } from './analysis.js';
 import { SKILLS, PROFILE_TESTS, PROFILE_SECONDS, buildProfile, weakest, strongest } from './profile.js';
 import { GAMES, gameById, cm360From, sensFrom, settingFor, yawFromMeasurement, fmtSens } from './games.js';
@@ -9,7 +11,7 @@ import { GAMES, gameById, cm360From, sensFrom, settingFor, yawFromMeasurement, f
 const DEFAULTS = {
   dpi: 800, game: 'cs2', sens: 1.25, fov: 103, raw: true, sound: true,
   xhStyle: 'cross', xhColor: '#4fd1a5', xhSize: 7, targetColor: '#ff4d5e',
-  finderDuration: 30, finderRounds: 6,
+  finderRounds: 6, testLength: 'normal', warmupFirst: true, dpiMeasured: false,
   myGames: ['cs2', 'valorant', 'apex', 'ow2', 'cod', 'fortnite', 'bf6', 'wardogs'],
   calib: {}, // gameId -> { yaw, sens, cm, dpi, date } aus dem 360°-Test
 };
@@ -114,7 +116,18 @@ let session = null, playing = null, countdownTimer = null;
 function showMenu(show) {
   $('menu').classList.toggle('hidden', !show);
   $('hud').classList.toggle('hidden', show);
+  $('hudTitle').classList.toggle('hidden', show);
   $('crosshair').classList.toggle('hidden', show);
+  document.documentElement.classList.toggle('playing', !show);
+}
+
+/** Treffer-Rückmeldung: Ton + kurzes X am Fadenkreuz */
+function fx(kind) {
+  sound(kind);
+  if (kind === 'hit' || kind === 'tick') {
+    const h = $('hitmarker');
+    h.classList.remove('show'); void h.getBoundingClientRect(); h.classList.add('show');
+  }
 }
 
 function overlay(html) {
@@ -122,25 +135,34 @@ function overlay(html) {
   if (html) $('overlayBox').innerHTML = html;
 }
 
-/** Startet eine Runde. opts: { cm360, duration, title, noHistory, onDone(result), onAbort() } */
+/**
+ * Startet eine Runde. opts: { cm360, duration, title, sub, noHistory, flag, onDone(result), onAbort(),
+ *   keepLock: Maus nach der Runde gefangen lassen (nächste Runde folgt direkt),
+ *   continueLocked: ohne Start-Klick beginnen, wenn die Maus noch gefangen ist }
+ */
 function play(modeId, opts = {}) {
   const cm = opts.cm360 ?? curCm();
   engine.setSensitivity(cm, S.dpi);
   engine.setFov(S.fov);
   engine.targetColor.set(S.targetColor);
   drawCrosshair();
-  session = new Session(engine, modeId, { duration: opts.duration, sound });
+  session = new Session(engine, modeId, { duration: opts.duration, sound: fx });
   playing = { modeId, opts, cm, state: 'ready' };
   engine.clearTargets();
   engine.resetView();
   showMenu(false);
-  askLock(opts.title || MODES[modeId].name, 'Klicke, um zu starten. <br><small>ESC pausiert die Runde.</small>');
+  $('hudTitle').textContent = opts.title || MODES[modeId].name;
+  if (opts.continueLocked && engine.locked) { overlay(null); startCountdown(); return; }
+  askLock(opts.title || MODES[modeId].name, opts.sub || MODES[modeId].desc);
 }
 
 function askLock(title, text) {
-  overlay(`<h2>${esc(title)}</h2><p class="muted">${text}</p>
-    <div class="row" style="justify-content:center"><button class="primary" id="goBtn">Los</button><button id="abortBtn">Abbrechen</button></div>
-    <p id="lockErr" class="muted" style="margin-top:12px"></p>`);
+  const paused = playing?.state === 'paused';
+  overlay(`<div style="display:grid;place-items:center;margin-bottom:12px;color:var(--accent)">${icon(paused ? 'pause' : 'crosshair', 34)}</div>
+    <h2>${esc(title)}</h2><p class="muted">${text}</p>
+    <div class="row" style="justify-content:center;margin-top:18px"><button class="primary lg" id="goBtn">${icon('play', 18)} ${paused ? 'Weiter' : 'Los geht’s'}</button><button class="lg" id="abortBtn">Abbrechen</button></div>
+    <p class="muted" style="margin:16px 0 0;font-size:12.5px"><span class="kbd">ESC</span> pausiert · <span class="kbd">F11</span> Vollbild</p>
+    <p id="lockErr" style="margin:10px 0 0;color:var(--warn);font-size:13px"></p>`);
   $('goBtn').onclick = async () => {
     try {
       await engine.lock(S.raw);
@@ -162,7 +184,7 @@ engine.onLockChange = (locked) => {
     if (playing.state === 'running') { playing.state = 'paused'; session.pause(); }
     if (playing.state === 'ready' || playing.state === 'paused') {
       askLock(playing.state === 'paused' ? 'Pausiert' : (playing.opts.title || MODES[playing.modeId].name),
-        playing.state === 'paused' ? 'Klicke auf „Los“, um weiterzumachen.' : 'Klicke, um zu starten.');
+        playing.state === 'paused' ? 'Die Zeit ist angehalten. Weiter, wenn du bereit bist.' : (playing.opts.sub || MODES[playing.modeId].desc));
     }
   }
 };
@@ -171,11 +193,12 @@ function startCountdown() {
   playing.state = 'countdown';
   let c = 3;
   const el = $('countdown');
-  el.textContent = c;
+  const draw = () => { el.innerHTML = `<div class="cd-title">${esc(playing.opts.title || MODES[playing.modeId].name)}</div><div class="cd-num">${c}</div>`; };
+  draw();
   el.classList.remove('hidden');
   countdownTimer = setInterval(() => {
     c--;
-    if (c > 0) { el.textContent = c; return; }
+    if (c > 0) { draw(); return; }
     clearInterval(countdownTimer);
     el.classList.add('hidden');
     playing.state = 'running';
@@ -196,7 +219,8 @@ function abort() {
 function finish() {
   const p = playing;
   playing = null;
-  engine.unlock();
+  const keep = p.opts.keepLock && engine.locked;
+  if (!keep) engine.unlock();
   const res = session.results();
   res.cm360 = p.cm;
   res.game = S.game;
@@ -209,9 +233,11 @@ function finish() {
     if (history.length > 500) history = history.slice(-500);
     save('aimforge.history', history);
   }
-  showMenu(true);
+  if (!keep) showMenu(true);
   if (p.opts.onDone) p.opts.onDone(res);
   else showResults(res);
+  // die nächste Runde hat nicht direkt angeschlossen -> zurück ins Menü
+  if (keep && !playing) { engine.unlock(); showMenu(true); }
 }
 
 function loop(now) {
@@ -222,6 +248,7 @@ function loop(now) {
       $('hudTime').textContent = l.left.toFixed(1);
       $('hudScore').textContent = l.score;
       $('hudAcc').textContent = Math.round(l.acc) + ' %';
+      $('hudBar').style.width = Math.min(100, (session.elapsed / session.duration) * 100) + '%';
     }
     engine.render();
   }
@@ -230,21 +257,32 @@ function loop(now) {
 requestAnimationFrame(loop);
 
 // ---------- Seiten ----------
-let page = 'train';
+let page = 'home';
 document.querySelectorAll('nav button').forEach((b) => {
+  b.innerHTML = b.innerHTML.replace(/<!--i:([\w-]+)-->/, (_, name) => icon(name, 18));
   b.onclick = () => { page = b.dataset.page; render(); };
 });
+$('sensbox').onclick = () => { page = 'sens'; render(); };
+if (window.desktop?.isDesktop) {
+  document.documentElement.classList.add('desktop');
+  $('tbVersion').textContent = window.desktop.version ? 'v' + window.desktop.version : '';
+}
+/** einheitlicher Seitenkopf */
+const head = (title, sub = '') => `<h2>${title}</h2>${sub ? `<p class="muted">${sub}</p>` : ''}`;
 
 function render() {
   document.querySelectorAll('nav button').forEach((b) => b.classList.toggle('active', b.dataset.page === page));
   const el = $('page');
-  ({ train: pageTrain, profile: pageProfile, sens: pageSens, finder: pageFinder, stats: pageStats, settings: pageSettings })[page](el);
+  el.style.animation = 'none'; void el.offsetWidth; el.style.animation = '';
+  ({ home: pageHome, wizard: pageWizard, train: pageTrain, profile: pageProfile, sens: pageSens, stats: pageStats, settings: pageSettings })[page](el);
+  document.querySelector('main').scrollTop = 0;
   updateSensbox();
 }
 
 function updateSensbox() {
-  $('sensbox').innerHTML = `<div class="muted">Aktuell</div><b>${n(curCm(), 1)} cm/360°</b><br>
-    <small>${esc(shortName(gameById(S.game)))}: ${fmtSens(S.sens)} @ ${S.dpi} DPI</small>`;
+  $('sensbox').innerHTML = `<div class="muted" style="font-size:11.5px;font-weight:600;text-transform:uppercase;letter-spacing:.06em">Deine Sensitivität</div>
+    <div class="v">${n(curCm(), 1)} <small style="font-size:13px;font-weight:550">cm/360°</small></div>
+    <small>${esc(shortName(gameById(S.game)))} ${fmtSens(S.sens)} · ${S.dpi} DPI</small>`;
 }
 
 /** Aufwärmrunden sind kürzer -> nicht mit normalen Runden vergleichen */
@@ -270,11 +308,11 @@ function pageTrain(el) {
   el.innerHTML = `<h2>Training</h2><p class="muted">Wähle ein Szenario. Gespielt wird mit deiner Sensitivität
     (${n(curCm(), 1)} cm/360°, Seite „Sensitivität“) und ${n(S.fov, 1)}° FOV (Einstellungen).</p>
     ${profiles.length ? (() => { const w = weakest(profiles[profiles.length - 1]); return `<div class="card click" id="focusCard" style="margin-bottom:14px;border-color:var(--warn)">
-      <h3>🎯 Dein Fokus: ${w.name}</h3><p class="muted" style="margin:0">Laut deinem letzten Profiltest deine schwächste Fähigkeit.
+      <h3>${icon('target', 18)} Dein Fokus: ${w.name}</h3><p class="muted" style="margin:0">Laut deinem letzten Profiltest deine schwächste Fähigkeit.
       ${w.focus.map((m) => MODES[m].name).join(' → ')} in normaler Länge – klicken zum Starten.</p></div>`; })() : ''}
-    <div class="card click" id="warmupCard" style="margin-bottom:14px;border-color:var(--accent2)"><h3>🔥 Aufwärmen · ${WARMUP.length * WARMUP_SECONDS / 60} Minuten</h3>
+    <div class="card click" id="warmupCard" style="margin-bottom:14px;border-color:var(--accent2)"><h3>${icon('flame', 18)} Aufwärmen · ${WARMUP.length * WARMUP_SECONDS / 60} Minuten</h3>
       <p class="muted" style="margin:0">${WARMUP.map((id) => MODES[id].name).join(' → ')}, je ${WARMUP_SECONDS} Sekunden am Stück. Ideal vor dem Spielen
-      oder vor dem Sens-Finder. Zählt nicht für Bestwerte.</p></div>
+      oder vor dem Sens-Assistenten. Zählt nicht für Bestwerte.</p></div>
     ${cards}
     <div class="card" style="margin-top:20px"><h3>Tipps für genaue Messwerte</h3>
     <p class="muted">Nutze Chrome oder Edge (Raw Input wird dort unterstützt). Schalte im Betriebssystem die Mausbeschleunigung
@@ -293,13 +331,14 @@ const WARMUP_SECONDS = 30;
  * items: [{ mode, duration? }] · label: Titel-Präfix · flag: Markierung im Verlauf (warmup/profile)
  * done(results, aborted) wird am Ende oder bei Abbruch aufgerufen.
  */
-function playSequence(items, { label, flag, done }) {
+function playSequence(items, { label, flag, done, keepLock = false }) {
   const results = [];
   const next = (i) => {
     if (i >= items.length) return done(results, false);
     const it = items[i];
     play(it.mode, {
       duration: it.duration, flag,
+      keepLock: i < items.length - 1 || keepLock, continueLocked: true,
       title: `${label} ${i + 1}/${items.length} – ${MODES[it.mode].name}`,
       onDone: (res) => { results.push(res); next(i + 1); },
       onAbort: () => done(results, true),
@@ -319,10 +358,14 @@ function sequenceSummary(title, results, total, then, note = '') {
 }
 
 /** spielt alle Aufwärm-Szenarien nacheinander; then() wird nach der Zusammenfassung aufgerufen */
-function startWarmup(then) {
+function startWarmup(then, { keepLock = false, quiet = false } = {}) {
   playSequence(WARMUP.map((mode) => ({ mode, duration: WARMUP_SECONDS })), {
-    label: 'Aufwärmen', flag: 'warmup',
-    done: (results, aborted) => (results.length ? sequenceSummary(`Aufwärmen ${aborted ? 'abgebrochen' : 'abgeschlossen'}`, results, WARMUP.length, then) : then()),
+    label: 'Aufwärmen', flag: 'warmup', keepLock,
+    done: (results, aborted) => {
+      if (quiet && !aborted) return then(); // direkt weiter (z. B. in den Sens-Test)
+      if (aborted && quiet) { render(); return; }
+      return results.length ? sequenceSummary(`Aufwärmen ${aborted ? 'abgebrochen' : 'abgeschlossen'}`, results, WARMUP.length, then) : then();
+    },
   });
 }
 
@@ -382,7 +425,7 @@ function pageProfile(el) {
     const bars = SKILLS.map((sk) => {
       const v = cur.skills[sk.id];
       if (!v) return '';
-      const tag = sk === weak ? '<span style="color:var(--warn);font-size:12px">⚠ schwächste</span>' : sk === strong ? '<span style="color:var(--accent);font-size:12px">★ stärkste</span>' : '';
+      const tag = sk === weak ? '<span class="badge warn">schwächste</span>' : sk === strong ? '<span class="badge ok">stärkste</span>' : '';
       return `<div style="display:grid;grid-template-columns:150px 1fr 120px;gap:14px;align-items:center;padding:10px 0;border-bottom:1px solid var(--line)" class="skillrow">
         <div><b>${sk.name}</b><br>${tag}</div>
         <div><div style="height:10px;background:var(--panel2);border-radius:5px;overflow:hidden"><div style="height:100%;width:${v.score}%;background:${sk === weak ? 'var(--warn)' : 'var(--accent2)'};border-radius:0 5px 5px 0"></div></div>
@@ -444,7 +487,7 @@ function showResults(r) {
   const best = prev.length ? Math.max(...prev.map((h) => h.score)) : null;
   const prevScore = best;
   el.innerHTML = `<h2>Ergebnis – ${MODES[r.mode].name}</h2>
-    ${prevScore !== null ? `<p class="muted">${r.score > prevScore ? '🏆 Neuer Bestwert!' : `Bestwert: ${prevScore}`}</p>` : ''}
+    ${prevScore !== null ? `<p class="muted">${r.score > prevScore ? `<span class="badge ok">${icon('trophy', 13)} Neuer Bestwert!</span>` : `Bisheriger Bestwert: ${prevScore}`}</p>` : ''}
     <div id="resultBody"></div>
     <p class="muted"><small>Diese Auswertung findest du später unter „Statistik“ wieder.</small></p>
     <div class="row"><button class="primary" id="again">Nochmal</button><button id="back">Zurück</button></div>`;
@@ -618,9 +661,8 @@ function pageSens(el) {
     const ok = !!yawFor(g);
     return `<option value="${g.id}" ${g.id === S.game ? 'selected' : ''} ${ok ? '' : 'disabled'}>${esc(g.name)}${ok ? '' : ' (erst kalibrieren)'}</option>`;
   }).join('');
-  const chips = GAMES.map((g) => `<label style="display:inline-flex;gap:6px;align-items:center;color:var(--text);margin:0 14px 8px 0">
-      <input type="checkbox" data-g="${g.id}" style="width:auto" ${S.myGames.includes(g.id) ? 'checked' : ''}>${esc(shortName(g))}</label>`).join('');
-  el.innerHTML = `<h2>Sensitivität</h2>
+  const chips = GAMES.map((g) => `<label class="chip ${S.myGames.includes(g.id) ? 'on' : ''}"><input type="checkbox" data-g="${g.id}" ${S.myGames.includes(g.id) ? 'checked' : ''}>${esc(shortName(g))}</label>`).join('');
+  el.innerHTML = `<h2>Meine Spiele</h2>
     <p class="muted">Deine Sensitivität wird als <b>cm/360°</b> gespeichert: so viele Zentimeter Mausweg ergeben eine volle Drehung.
     Das ist in jedem Spiel gleich messbar. Unten steht, welchen Wert du in welchem Spiel einträgst, damit es sich überall gleich anfühlt.</p>
     <div class="grid2">
@@ -632,10 +674,9 @@ function pageSens(el) {
         </div>
         <div class="big" id="sValue" style="margin-top:12px"></div><small id="sValueSub"></small></div>
       <div class="card"><h3>Einmal pro Spiel prüfen</h3><p class="muted" style="margin:0"><small>
-        ✔ Mausbeschleunigung im Spiel aus<br>✔ „Raw Input“ an, falls es die Option gibt<br>
-        ✔ Windows: „Zeigerbeschleunigung verbessern“ aus<br>✔ Maus-DPI überall gleich lassen<br>
-        ✔ Werte gelten für normales Zielen (Hipfire), nicht für Visier/Scope<br>
-        ✔ Der Sens-Finder setzt diesen Wert automatisch</small></p></div>
+        ${['Mausbeschleunigung im Spiel aus', '„Raw Input“ an, falls es die Option gibt', 'Windows: „Zeigerbeschleunigung verbessern“ aus',
+          'Maus-DPI überall gleich lassen', 'Werte gelten für normales Zielen (Hipfire), nicht für Visier/Scope', 'Der Sens-Assistent setzt diesen Wert automatisch']
+          .map((t) => `<span style="display:flex;gap:8px;margin:3px 0"><span style="color:var(--accent)">${icon('check', 15)}</span>${t}</span>`).join('')}</small></p></div>
     </div>
     <h3 style="margin-top:20px">Deine Spiele</h3><div>${chips}</div>
     <div id="sTip"></div>
@@ -713,6 +754,7 @@ function pageSens(el) {
   $('sSens').oninput = (e) => { const v = parseNum(e.target.value); if (v > 0) { S.sens = v; saveSettings(); draw(); } };
   $('sDpi').oninput = (e) => { const v = parseNum(e.target.value); if (v > 0) { S.dpi = v; saveSettings(); draw(); } };
   el.querySelectorAll('[data-g]').forEach((c) => (c.onchange = () => {
+    c.parentElement.classList.toggle('on', c.checked);
     S.myGames = c.checked ? [...new Set([...S.myGames, c.dataset.g])] : S.myGames.filter((x) => x !== c.dataset.g);
     S.myGames.sort((a, b) => GAMES.findIndex((g) => g.id === a) - GAMES.findIndex((g) => g.id === b));
     saveSettings(); draw();
@@ -722,72 +764,11 @@ function pageSens(el) {
   draw();
 }
 
-// ----- Sensitivitäts-Finder -----
-let finder = null;
-
-function pageFinder(el) {
-  if (finder) return finderStep(el);
-  el.innerHTML = `<h2>Sensitivitäts-Finder</h2>
-    <p class="muted">Der Finder lässt dich mehrere Runden lang je zwei Sensitivitäten gegeneinander testen. Die Werte werden dir
-    erst nach jedem Paar gezeigt (Blindtest). Die bessere bleibt, die andere rückt zur Mitte – so wird der Bereich immer enger,
-    bis deine beste Sensitivität übrig bleibt. Zum Schluss wird sie anhand deines Bewegungsmusters (Über-/Unterschießen) fein justiert.</p>
-    <div class="card"><div class="grid2">
-      <div><label>Startwert</label><b>${n(curCm(), 1)} cm/360°</b><br><small>von der Seite „Sensitivität“</small></div>
-      <div><label>Dauer pro Test</label><select id="fDur">${[20, 30, 45].map((d) => `<option ${d == S.finderDuration ? 'selected' : ''} value="${d}">${d} s</option>`).join('')}</select></div>
-      <div><label>Runden</label><select id="fRounds">${[4, 5, 6, 7].map((d) => `<option ${d == S.finderRounds ? 'selected' : ''} value="${d}">${d} (≈ ${Math.round(d * 2 * S.finderDuration / 60 + d * 0.5)} min)</option>`).join('')}</select></div>
-    </div></div>
-    <p class="muted" style="margin-top:14px">Tipp: Spiel dich vorher warm, damit die ersten Tests nicht schlechter ausfallen als die späteren.</p>
-    <div class="row"><button class="primary" id="fStart">Finder starten</button>
-      <button id="fWarm">Erst aufwärmen (${WARMUP.length * WARMUP_SECONDS / 60} min), dann Finder</button></div>`;
-  $('fDur').onchange = (e) => { S.finderDuration = +e.target.value; saveSettings(); render(); };
-  $('fRounds').onchange = (e) => { S.finderRounds = +e.target.value; saveSettings(); };
-  $('fStart').onclick = () => { finder = new SensFinder(curCm(), S.finderRounds); render(); };
-  $('fWarm').onclick = () => startWarmup(() => { page = 'finder'; finder = new SensFinder(curCm(), S.finderRounds); render(); });
-}
-
-function finderStep(el) {
-  const f = finder;
-  const total = f.rounds * 2, done = f.round * 2 + f.step;
-  const bar = `<div class="progress"><div style="width:${(done / total) * 100}%"></div></div>`;
-  if (f.done) return finderResult(el);
-  const t = f.nextTest();
-  if (t) {
-    el.innerHTML = `<h2>Sens-Finder – Runde ${f.round + 1} von ${f.rounds}</h2>${bar}
-      <div class="card"><h3>Test ${t.label}</h3><p class="muted">${S.finderDuration} Sekunden gemischte Flicks. Die Sensitivität bleibt
-      verborgen – konzentriere dich nur darauf, schnell und sauber zu treffen.</p>
-      <div class="row"><button class="primary" id="fGo">Test ${t.label} starten</button><button id="fCancel">Finder abbrechen</button></div></div>`;
-    $('fGo').onclick = () => play('finder', {
-      cm360: t.cm360, duration: S.finderDuration, title: `Test ${t.label}`, noHistory: true,
-      onDone: (res) => { f.record(res); render(); },
-      onAbort: render,
-    });
-    $('fCancel').onclick = () => { finder = null; render(); };
-    return;
-  }
-  // beide Tests fertig -> Vergleich
-  const sug = f.suggestedWinner();
-  let sel = sug;
-  const labelOf = (idx) => (f.order[0] === idx ? 'A' : 'B');
-  const card = (idx) => {
-    const r = f.results[idx];
-    return `<div class="card ${idx === sel ? 'sel' : ''}" data-idx="${idx}"><h3>Test ${labelOf(idx)} ${idx === sug ? '<small>· höherer Score</small>' : ''}</h3>
-      <div class="big">${r.score}</div><small>Punkte</small>
-      <p style="margin-top:10px">${n(r.cm360, 1)} cm/360° <span class="muted">(${fmtSens(r.sensInGame)} in ${esc(shortName(gameById(S.game)))})</span></p>
-      <p class="muted">Treffer ${r.hits} · Genauigkeit ${n(r.acc, 1)} % · Ø ${ms(r.avgTtk)} pro Ziel<br>
-      Überschießer ${pct(r.overshootRate)} · erste Bewegung ${pct(r.ratio)}</p></div>`;
-  };
-  const draw = () => {
-    el.innerHTML = `<h2>Sens-Finder – Runde ${f.round + 1} von ${f.rounds}</h2>${bar}
-      <p class="muted">Vorgeschlagen ist der Test mit dem höheren Score. Wenn sich der andere deutlich besser angefühlt hat,
-      kannst du ihn stattdessen anklicken.</p>
-      <div class="vs">${[f.order[0], f.order[1]].map(card).join('')}</div>
-      <div class="row"><button class="primary" id="fNext">Weiter mit Test ${labelOf(sel)}</button><button id="fCancel">Finder abbrechen</button></div>`;
-    el.querySelectorAll('.vs .card').forEach((c) => (c.onclick = () => { sel = +c.dataset.idx; draw(); }));
-    $('fNext').onclick = () => { f.choose(sel); render(); };
-    $('fCancel').onclick = () => { finder = null; render(); };
-  };
-  draw();
-}
+// ----- Sens-Assistent: geführter Weg zur optimalen Sensitivität -----
+const RUNS_KEY = 'aimforge.sensRuns';
+let sensRuns = load(RUNS_KEY, []);
+const saveRuns = () => save(RUNS_KEY, sensRuns.slice(-50));
+let wiz = null; // { step: 'setup'|'prep'|'paused'|'pair'|'result', finder, result }
 
 /** fasst die Bewegungsdaten mehrerer Tests gewichtet zusammen */
 function mergeSummaries(list) {
@@ -798,39 +779,306 @@ function mergeSummaries(list) {
   return { flicks: W, ratio: w('ratio'), overshootRate: w('overshootRate'), undershootRate: w('undershootRate') };
 }
 
-function finderResult(el) {
-  const f = finder;
-  const found = f.cm360Of(f.winnerMult);
-  const bias = biasAdvice(mergeSummaries(f.finalResults()));
-  const fine = found / bias.factor;
-  const ref = shortName(gameById(S.game));
-  const hist = f.history.map((h) => `<tr><td>${h.round}</td>${[0, 1].map((i) =>
-    `<td class="num">${h.winner === i ? '<b>' : ''}${n(f.cm360Of(h.pair[i]), 1)} cm · ${h.results[i].score}${h.winner === i ? '</b>' : ''}</td>`).join('')}</tr>`).join('');
-  el.innerHTML = `<h2>Deine Sensitivität</h2>
+/** empfohlener Wert: kombiniert aus mehreren Durchläufen, sonst der letzte */
+function recommendation() {
+  const c = combineRuns(sensRuns);
+  return c && c.count >= 2 && c.spread <= 0.15 ? c : (sensRuns.length ? { ...c, cm360: sensRuns[sensRuns.length - 1].cm360 } : null);
+}
+
+function stepsBar(active) {
+  const names = ['Einrichtung', 'Vorbereitung', 'Blindtest', 'Ergebnis'];
+  return `<div class="steps">${names.map((nm, i) => `<div class="st ${i === active ? 'on' : i < active ? 'done' : ''}"><i>${i < active ? icon('check', 13) : i + 1}</i>${nm}</div>`).join('')}</div>`;
+}
+
+function pageWizard(el) {
+  if (!wiz) wiz = { step: 'setup' };
+  ({ setup: wizSetup, prep: wizPrep, paused: wizPaused, pair: wizPair, result: wizResult })[wiz.step](el);
+}
+
+function wizSetup(el) {
+  const options = GAMES.filter((g) => yawFor(g)).map((g) => `<option value="${g.id}" ${g.id === S.game ? 'selected' : ''}>${esc(g.name)}</option>`).join('');
+  const chips = GAMES.map((g) => `<label class="chip ${S.myGames.includes(g.id) ? 'on' : ''}"><input type="checkbox" data-g="${g.id}" ${S.myGames.includes(g.id) ? 'checked' : ''}>${esc(shortName(g))}</label>`).join('');
+  el.innerHTML = head('Sens-Assistent', 'In 10–15 Minuten zu deiner optimalen Mausempfindlichkeit – und zu den passenden Werten für jedes deiner Spiele.') + stepsBar(0) + `
     <div class="grid2">
-      <div class="card"><label>Empfehlung (feinjustiert)</label><div class="big">${n(fine, 1)} cm/360°</div>
-        <small>${esc(ref)}: ${fmtSens(sensFrom(fine, curYaw(), S.dpi))} @ ${S.dpi} DPI</small></div>
-      <div class="card"><label>Finder-Ergebnis (nur Paarvergleich)</label><div class="big" style="color:var(--text)">${n(found, 1)} cm/360°</div>
-        <small>${esc(ref)}: ${fmtSens(sensFrom(found, curYaw(), S.dpi))} · Startwert war ${n(f.base, 1)} cm/360°</small></div>
+      <div class="card"><h3>${icon('gamepad-2', 18)} Dein Hauptspiel</h3>
+        <p class="muted"><small>Deine jetzige Einstellung ist der Startpunkt. Getestet wird von halb so schnell bis 1,5-mal so schnell.</small></p>
+        <label>Spiel</label><select id="wGame">${options}</select>
+        <div class="grid2" style="margin-top:12px;grid-template-columns:1fr 1fr">
+          <div><label>Sensitivität dort</label><input id="wSens" type="text" inputmode="decimal" value="${S.sens}"></div>
+          <div><label>Maus-DPI</label><input id="wDpi" type="text" inputmode="numeric" value="${S.dpi}"></div>
+        </div>
+        <p style="margin:14px 0 0" class="muted">Entspricht <b id="wCm" style="color:var(--text)"></b></p></div>
+      <div class="card"><h3>${icon('mouse', 18)} Deine Maus</h3>
+        <p class="muted"><small>Die DPI-Angabe des Herstellers weicht oft einige Prozent ab. Für den Test selbst ist das egal – für die cm-Angaben und
+        die Kalibrierung von Spielen wie Battlefield 6 aber nicht. Die Mausprüfung misst sie mit einem Lineal nach und prüft Raw Input.</small></p>
+        <button id="wCheck">${icon('ruler', 16)} Maus prüfen (1 Minute)</button>
+        ${S.dpiMeasured ? `<p style="margin:12px 0 0"><span class="badge ok">${icon('check', 12)} DPI gemessen: ${S.dpi}</span></p>` : ''}</div>
     </div>
-    <h3 style="margin-top:20px">Bewegungsanalyse der letzten Runden</h3>${adviceBox(bias)}
-    <div class="row" style="margin:16px 0"><button class="primary" id="fApply">Empfehlung übernehmen</button>
-      <button id="fApply2">Finder-Ergebnis übernehmen</button><button id="fRestart">Neu starten</button></div>
-    <p class="muted">Nach dem Übernehmen siehst du auf der Seite „Sensitivität“, welchen Wert du in welchem Spiel einträgst.</p>
-    <h3 style="margin-top:24px">Verlauf</h3>
-    <table><tr><th>Runde</th><th class="num">Kandidat 1</th><th class="num">Kandidat 2</th></tr>${hist}</table>
-    <p class="muted" style="margin-top:14px"><small>Das Ergebnis ist ein Startpunkt, kein Gesetz: Spiele ein paar Tage damit, bevor du
-    wieder änderst. Ein zweiter Durchlauf an einem anderen Tag zeigt, ob das Ergebnis stabil ist.</small></p>`;
-  const apply = (cm) => {
+    <div class="card" style="margin-top:14px"><h3>${icon('target', 18)} Für welche Spiele brauchst du Werte?</h3>
+      <p class="muted"><small>Am Ende bekommst du für jedes ausgewählte Spiel den Wert, den du dort einträgst.</small></p><div id="wChips">${chips}</div></div>
+    <div class="row end" style="margin-top:20px"><button class="primary lg" id="wNext">Weiter ${icon('arrow-right', 18)}</button></div>`;
+  const upd = () => { $('wCm').textContent = `${n(curCm(), 1)} cm/360°`; updateSensbox(); };
+  $('wGame').onchange = (e) => {
+    const cm = curCm(); S.game = e.target.value;
     S.sens = +sensFrom(cm, curYaw(), S.dpi).toFixed(4);
-    saveSettings();
-    history.push({ mode: 'finderResult', date: Date.now(), cm360: cm, score: 0 });
-    save('aimforge.history', history);
-    finder = null; page = 'sens'; render();
+    $('wSens').value = S.sens;
+    const g = gameById(S.game); if (g.fov) S.fov = g.fov;
+    saveSettings(); upd();
   };
-  $('fApply').onclick = () => apply(fine);
-  $('fApply2').onclick = () => apply(found);
-  $('fRestart').onclick = () => { finder = null; render(); };
+  $('wSens').oninput = (e) => { const v = parseNum(e.target.value); if (v > 0) { S.sens = v; saveSettings(); upd(); } };
+  $('wDpi').oninput = (e) => { const v = parseNum(e.target.value); if (v > 0) { S.dpi = v; S.dpiMeasured = false; saveSettings(); upd(); } };
+  $('wCheck').onclick = () => mouseCheck(render);
+  el.querySelectorAll('[data-g]').forEach((c) => (c.onchange = () => {
+    c.parentElement.classList.toggle('on', c.checked);
+    S.myGames = c.checked ? [...new Set([...S.myGames, c.dataset.g])] : S.myGames.filter((x) => x !== c.dataset.g);
+    S.myGames.sort((a, b) => GAMES.findIndex((g) => g.id === a) - GAMES.findIndex((g) => g.id === b));
+    saveSettings();
+  }));
+  $('wNext').onclick = () => {
+    if (!S.myGames.length) { toast('Wähle mindestens ein Spiel aus', 'warn'); return; }
+    wiz.step = 'prep'; render();
+  };
+  upd();
+}
+
+function wizPrep(el) {
+  const L = TEST_LENGTHS[S.testLength] || TEST_LENGTHS.normal;
+  const minutes = Math.round(((L.flick + L.track + 7) * 2 * S.finderRounds + S.finderRounds * 15 + (S.warmupFirst ? 135 : 0)) / 60);
+  el.innerHTML = head('Sens-Assistent', 'So läuft der Test ab – ein paar Minuten volle Konzentration lohnen sich.') + stepsBar(1) + `
+    <div class="grid2">
+      ${[['crosshair', 'Blindtest', 'Pro Runde spielst du zwei Kandidaten A und B. Welche Sensitivität gerade aktiv ist, siehst du nicht – so entscheidet deine Leistung, nicht dein Kopf.'],
+        ['zap', 'Flicks + Tracking', `Jeder Kandidat: ${L.flick} s Ziele in 5–40° Entfernung, dann ${L.track} s ein bewegtes Ziel verfolgen. Beides zählt.`],
+        ['refresh-cw', 'Eingrenzen', `Der Bessere bleibt, der Bereich halbiert sich – ${S.finderRounds} Runden. Bei Gleichstand wird das Paar automatisch wiederholt.`]]
+        .map(([ic, t, d]) => `<div class="card"><h3 style="color:var(--accent)">${icon(ic, 18)}<span style="color:var(--text)">${t}</span></h3><p class="muted" style="margin:0"><small>${d}</small></p></div>`).join('')}
+    </div>
+    <div class="card" style="margin-top:14px"><div class="grid2">
+      <div><label>Testlänge</label><div>${Object.entries(TEST_LENGTHS).map(([k, v]) => `<label class="chip ${S.testLength === k ? 'on' : ''}"><input type="radio" name="len" value="${k}" ${S.testLength === k ? 'checked' : ''}>${v.name}</label>`).join('')}</div></div>
+      <div><label>Runden</label><div>${[5, 6, 7].map((r) => `<label class="chip ${S.finderRounds === r ? 'on' : ''}"><input type="radio" name="rounds" value="${r}" ${S.finderRounds === r ? 'checked' : ''}>${r}${r === 6 ? ' (empfohlen)' : ''}</label>`).join('')}</div></div>
+      <div><label>Vorher</label><label class="chip ${S.warmupFirst ? 'on' : ''}"><input type="checkbox" id="wWarm" ${S.warmupFirst ? 'checked' : ''}>${icon('flame', 15)} 2 Min. aufwärmen</label></div>
+    </div><p class="muted" style="margin:6px 0 0">Dauer insgesamt etwa <b style="color:var(--text)">${minutes} Minuten</b>.</p></div>
+    <div class="advice info"><b>Für ein gutes Ergebnis:</b> Vollbild mit <code>F11</code>, gleiche Sitzhaltung und Mausunterlage wie beim Spielen, nicht müde.
+      Zwischen den Runden kannst du jederzeit pausieren.</div>
+    <div class="row" style="margin-top:20px;justify-content:space-between"><button class="ghost" id="wBack">${icon('arrow-left', 16)} Zurück</button>
+      <button class="primary lg" id="wStart">${icon('play', 18)} Test starten</button></div>`;
+  el.querySelectorAll('input[name=len]').forEach((r) => (r.onchange = () => { S.testLength = r.value; saveSettings(); render(); }));
+  el.querySelectorAll('input[name=rounds]').forEach((r) => (r.onchange = () => { S.finderRounds = +r.value; saveSettings(); render(); }));
+  $('wWarm').onchange = (e) => { S.warmupFirst = e.target.checked; saveSettings(); render(); };
+  $('wBack').onclick = () => { wiz.step = 'setup'; render(); };
+  $('wStart').onclick = () => {
+    wiz.finder = new SensFinder(curCm(), S.finderRounds, S.testLength);
+    wiz.baseGame = S.game;
+    if (S.warmupFirst) startWarmup(runNextTest, { keepLock: true, quiet: true });
+    else runNextTest();
+  };
+}
+
+/** spielt den nächsten Kandidaten-Test (Flick-Teil, dann Tracking-Teil) – ohne Klick dazwischen */
+function runNextTest() {
+  const f = wiz.finder;
+  const t = f.nextTest();
+  if (!t) { wiz.step = 'pair'; page = 'wizard'; render(); return; }
+  page = 'wizard';
+  const L = f.lengths;
+  const base = `Runde ${f.round + 1}/${f.rounds} · Test ${t.label}${f.repeated ? ' (Wiederholung)' : ''}`;
+  const lastOfPair = f.step === 1;
+  play('finder', {
+    cm360: t.cm360, duration: L.flick, noHistory: true, title: `${base} · Flicks`, keepLock: true, continueLocked: true,
+    sub: 'Triff die Ziele so schnell und sauber wie möglich. Danach folgt direkt der Tracking-Teil. Die Sensitivität ist verborgen.',
+    onDone: (r1) => play('track', {
+      cm360: t.cm360, duration: L.track, noHistory: true, title: `${base} · Tracking`, keepLock: !lastOfPair, continueLocked: true,
+      sub: 'Halte das Fadenkreuz auf dem Ziel.',
+      onDone: (r2) => { f.record(r1, r2); runNextTest(); },
+      onAbort: wizInterrupted,
+    }),
+    onAbort: wizInterrupted,
+  });
+}
+
+function wizInterrupted() { wiz.step = 'paused'; page = 'wizard'; render(); }
+
+function wizPaused(el) {
+  const f = wiz.finder;
+  el.innerHTML = head('Sens-Assistent') + stepsBar(2) + `
+    <div class="card"><h3>${icon('pause', 18)} Test unterbrochen</h3>
+      <p class="muted">Runde ${f.round + 1} von ${f.rounds}. Der angefangene Test wird beim Fortsetzen neu gestartet, alle fertigen Runden bleiben erhalten.</p>
+      <div class="row"><button class="primary" id="wGo">${icon('play', 16)} Fortsetzen</button><button id="wQuit">Assistent beenden</button></div></div>`;
+  $('wGo').onclick = runNextTest;
+  $('wQuit').onclick = async () => {
+    if (await confirmDialog({ title: 'Assistent beenden?', text: 'Der bisherige Fortschritt dieses Durchlaufs geht verloren.', ok: 'Beenden', danger: true })) { wiz = null; page = 'home'; render(); }
+  };
+}
+
+function wizPair(el) {
+  const f = wiz.finder;
+  const v = f.verdict();
+  const bar = `<div class="progress"><div style="width:${(f.round / f.rounds) * 100}%"></div></div>`;
+  if (v.needsRepeat) {
+    el.innerHTML = head('Sens-Assistent') + stepsBar(2) + bar + `
+      <div class="card warn"><h3>${icon('refresh-cw', 18)} Kopf-an-Kopf-Rennen</h3>
+        <p class="muted">A und B liegen nur ${n(v.diff * 100, 1)} % auseinander – das ist im Bereich des Messrauschens. Damit der Zufall nicht entscheidet,
+        wird dieses Paar noch einmal getestet (in umgekehrter Reihenfolge).</p>
+        <button class="primary" id="wRep">${icon('play', 16)} Wiederholung starten</button></div>`;
+    $('wRep').onclick = () => { f.repeat(); runNextTest(); };
+    return;
+  }
+  let sel = v.winner;
+  const labelOf = (idx) => (f.order[0] === idx ? 'A' : 'B');
+  const avg = (rs, fn) => rs.reduce((a, x) => a + fn(x), 0) / rs.length;
+  const card = (idx) => {
+    const rs = f.results[idx];
+    return `<div class="card ${idx === sel ? 'sel' : ''}" data-idx="${idx}">
+      <div class="row" style="justify-content:space-between"><h3 style="margin:0">Test ${labelOf(idx)}</h3>${idx === v.winner && !v.tie ? `<span class="badge ok">${icon('trophy', 12)} besser</span>` : ''}</div>
+      <div class="big" style="margin-top:8px">${Math.round(v.scores[idx] * 100)}</div><small>Wertung (100 = Durchschnitt beider)</small>
+      <div class="stats" style="grid-template-columns:1fr 1fr;margin-bottom:0">
+        ${stat('Ziele pro Sekunde', n(avg(rs, (x) => (x.flick.kills ?? x.flick.hits) / x.flick.duration), 2))}
+        ${stat('Genauigkeit', n(avg(rs, (x) => x.flick.acc), 1) + ' %')}
+        ${stat('Tracking am Ziel', n(avg(rs, (x) => x.track.onTarget), 1) + ' %')}
+        ${stat('Überschießer', pct(avg(rs, (x) => x.flick.overshootRate || 0)))}</div></div>`;
+  };
+  const last = f.round + 1 >= f.rounds;
+  const draw = () => {
+    el.innerHTML = head('Sens-Assistent') + stepsBar(2) + bar + `
+      <h3>Runde ${f.round + 1} von ${f.rounds}</h3>
+      <p class="muted">${v.tie ? 'Auch nach der Wiederholung praktisch gleichauf. Wähle den Test, der sich <b>besser angefühlt</b> hat.' :
+        'Vorgeschlagen ist der Test mit der besseren Wertung. Hat sich der andere klar besser angefühlt, kannst du ihn anklicken.'}</p>
+      <div class="vs">${[f.order[0], f.order[1]].map(card).join('')}</div>
+      <div class="row" style="justify-content:space-between"><button class="ghost" id="wPause">${icon('pause', 16)} Pause</button>
+        <button class="primary lg" id="wNext">${last ? `${icon('sparkles', 18)} Ergebnis berechnen` : `Weiter mit Test ${labelOf(sel)} ${icon('arrow-right', 18)}`}</button></div>`;
+    el.querySelectorAll('.vs .card').forEach((c) => (c.onclick = () => { sel = +c.dataset.idx; draw(); }));
+    $('wPause').onclick = () => { wiz.step = 'paused'; render(); };
+    $('wNext').onclick = () => {
+      f.choose(sel, v.tie ? 'feel' : sel === v.winner ? 'score' : 'override');
+      if (f.done) finishWizard(); else runNextTest();
+    };
+  };
+  draw();
+}
+
+function finishWizard() {
+  const f = wiz.finder;
+  const found = f.cm360Of(f.winnerMult);
+  const bias = biasAdvice(mergeSummaries(f.finalFlicks()));
+  const run = { date: Date.now(), cm360: found / bias.factor, found, base: f.base, dpi: S.dpi, game: wiz.baseGame || S.game, rounds: f.rounds, length: f.length };
+  sensRuns.push(run);
+  saveRuns();
+  wiz.step = 'result';
+  wiz.result = { run, bias, history: f.history, finder: f };
+  page = 'wizard';
+  render();
+}
+
+function resultGameCard(g, cm) {
+  const yaw = yawFor(g);
+  if (!yaw) {
+    return `<div class="card gamecard"><h3>${esc(g.name)}</h3><p class="muted"><small>Für dieses Spiel gibt es keinen verlässlichen Umrechnungswert.
+      Unter „Meine Spiele“ kannst du es mit einem 360°-Test kalibrieren – danach steht hier dein Wert.</small></p>
+      <button data-goto="sens">${icon('ruler', 16)} Kalibrieren</button></div>`;
+  }
+  const st = settingFor(g, yaw, cm, S.dpi);
+  const cmd = g.cmd ? g.cmd.replace('{s}', st.text) : null;
+  const status = yawStatus(g);
+  return `<div class="card gamecard"><div class="row" style="justify-content:space-between"><h3 style="margin:0">${esc(shortName(g))}</h3>
+      ${status.kind !== 'ok' ? `<span class="badge warn" title="${esc(status.text)}">prüfen</span>` : ''}</div>
+    <div class="val" style="margin:10px 0 2px">${st.text}</div>
+    <small>${esc(g.where || 'Mausempfindlichkeit im Spielmenü')}</small>
+    <div class="row" style="margin-top:12px"><button data-copy="${esc(cmd || st.text)}" style="padding:6px 12px">${icon('copy', 15)} ${cmd ? 'Befehl kopieren' : 'Kopieren'}</button>
+      ${Math.abs(st.deviation) > 1 ? `<span class="badge warn">Rundung ${st.deviation > 0 ? '+' : ''}${n(st.deviation, 1)} %</span>` : ''}</div></div>`;
+}
+
+function wizResult(el) {
+  const { run, bias, history: hist, finder: f } = wiz.result;
+  const comb = combineRuns(sensRuns);
+  const useComb = comb && comb.count >= 2 && comb.spread <= 0.15;
+  const rec = useComb ? comb.cm360 : run.cm360;
+  const refG = gameById(run.game);
+  const refYaw = yawFor(refG) || curYaw();
+  const games = S.myGames.map(gameById);
+  const hrows = hist.map((h) => `<tr><td>${h.round}</td>${[0, 1].map((i) => `<td class="num">${h.winner === i ? `<b style="color:var(--accent)">` : ''}${n(f.cm360Of(h.pair[i]), 1)} cm · ${Math.round(h.scores[i] * 100)}${h.winner === i ? '</b>' : ''}</td>`).join('')}
+    <td>${{ score: 'Wertung', feel: 'Gefühl (Gleichstand)', override: 'Gefühl (überstimmt)' }[h.how]}</td></tr>`).join('');
+  el.innerHTML = head('Dein Ergebnis', 'Das sind die Werte, die du in deinen Spielen einträgst.') + stepsBar(3) + `
+    <div class="card hero">
+      <div class="grid2" style="align-items:end">
+        <div><label>${useComb ? `Empfehlung aus ${comb.count} Durchläufen` : 'Deine optimale Sensitivität'}</label>
+          <div class="big" style="font-size:52px">${n(rec, 1)} <span style="font-size:22px;color:var(--text2)">cm/360°</span></div>
+          <p class="muted" style="margin:0">${esc(shortName(refG))}: <b style="color:var(--text)">${fmtSens(sensFrom(rec, refYaw, S.dpi))}</b> bei ${S.dpi} DPI
+            · vorher ${fmtSens(sensFrom(run.base, refYaw, S.dpi))} (${n(run.base, 1)} cm/360°)</p></div>
+        <div><span class="badge ${comb.level === 'warn' ? 'warn' : comb.level === 'ok' ? 'ok' : ''}">${icon(comb.level === 'warn' ? 'triangle-alert' : 'circle-check', 12)}
+          ${comb.count === 1 ? 'Erster Durchlauf' : comb.level === 'warn' ? 'Schwankt noch' : 'Bestätigt'}</span>
+          <p class="muted" style="margin:8px 0 0"><small>${esc(comb.text)}</small></p></div>
+      </div>
+      <div class="row" style="margin-top:20px"><button class="primary lg" id="rApply">${icon('check', 18)} Als meine Sensitivität übernehmen</button>
+        <button class="lg" id="rSheet">${icon('download', 18)} Spickzettel speichern</button></div>
+    </div>
+    <h3 style="margin-top:28px">Deine Werte pro Spiel <span class="muted" style="font-weight:500;font-size:13px">· ${S.dpi} DPI · Hipfire</span></h3>
+    <div class="cards">${games.map((g) => resultGameCard(g, rec)).join('')}</div>
+    <h3 style="margin-top:28px">Wie das Ergebnis zustande kam</h3>
+    <p class="muted">Im Paarvergleich hat sich <b style="color:var(--text)">${n(run.found, 1)} cm/360°</b> durchgesetzt. Danach wurde dein Bewegungsmuster in den letzten Runden ausgewertet:</p>
+    ${adviceBox(bias)}
+    ${useComb ? `<p class="muted"><small>Dieser Durchlauf allein: ${n(run.cm360, 1)} cm/360°. Die Empfehlung oben ist der Median deiner letzten ${comb.count} Durchläufe – das gleicht Tagesform aus.</small></p>` : ''}
+    <details style="margin-top:10px"><summary style="cursor:pointer;color:var(--accent);font-weight:600">${icon('chevron-right', 15)} Alle Runden anzeigen</summary>
+      <table style="margin-top:10px"><tr><th>Runde</th><th class="num">Kandidat 1</th><th class="num">Kandidat 2</th><th>Entschieden nach</th></tr>${hrows}</table></details>
+    <div class="advice info" style="margin-top:20px"><b>Wie geht’s weiter?</b> Trag die Werte ein und spiel ein paar Tage damit, bevor du wieder etwas änderst – Muskelgedächtnis braucht Zeit.
+      Mach den Assistenten in etwa einer Woche noch einmal: Mit jedem Durchlauf wird die Empfehlung sicherer.</div>
+    <div class="row end"><button id="rDone">Fertig</button></div>`;
+  el.querySelectorAll('[data-copy]').forEach((b) => (b.onclick = () => navigator.clipboard?.writeText(b.dataset.copy).then(() => toast(`„${b.dataset.copy}“ kopiert`))));
+  el.querySelectorAll('[data-goto]').forEach((b) => (b.onclick = () => { page = b.dataset.goto; render(); }));
+  $('rApply').onclick = () => {
+    if (yawFor(refG)) S.game = refG.id;
+    S.sens = +sensFrom(rec, curYaw(), S.dpi).toFixed(4);
+    saveSettings();
+    history.push({ mode: 'finderResult', date: Date.now(), cm360: rec, score: 0 });
+    save('aimforge.history', history);
+    toast(`Übernommen: ${n(rec, 1)} cm/360° – Training und „Meine Spiele“ nutzen jetzt diesen Wert`);
+    $('rApply').innerHTML = `${icon('check', 18)} Übernommen`;
+  };
+  $('rSheet').onclick = () => download('aimforge-sensitivitaet.txt', cheatSheet(rec), 'text/plain;charset=utf-8');
+  $('rDone').onclick = () => { wiz = null; page = 'home'; render(); };
+}
+
+// ----- Startseite -----
+function pageHome(el) {
+  const rec = recommendation();
+  const cm = curCm();
+  const prof = profiles[profiles.length - 1];
+  const recent = history.filter((r) => MODES[r.mode] && !MODES[r.mode].hidden).slice(-5).reverse();
+  const top = S.myGames.map(gameById).filter((g) => yawFor(g)).slice(0, 4);
+  const hour = new Date().getHours();
+  const hello = hour < 11 ? 'Guten Morgen' : hour < 18 ? 'Hallo' : 'Guten Abend';
+  const hero = !sensRuns.length
+    ? `<div class="card hero"><div style="max-width:620px">
+        <span class="badge ok">${icon('sparkles', 12)} Empfohlener erster Schritt</span>
+        <h2 style="margin:12px 0 8px;font-size:30px">Finde deine perfekte Sensitivität</h2>
+        <p class="muted" style="font-size:15px">Der Sens-Assistent testet im Blindtest, mit welcher Mausempfindlichkeit du am schnellsten und saubersten triffst –
+        und rechnet sie für jedes deiner Spiele um. Dauer: 10–15 Minuten.</p>
+        <button class="primary lg" id="hWiz">${icon('wand-sparkles', 18)} Sens-Assistent starten</button></div></div>`
+    : `<div class="card hero"><div class="grid2" style="align-items:center">
+        <div><label>Deine Sensitivität</label><div class="big" style="font-size:48px">${n(cm, 1)} <span style="font-size:20px;color:var(--text2)">cm/360°</span></div>
+          <p class="muted" style="margin:0">${rec && Math.abs(rec.cm360 / cm - 1) > 0.03 ? `Assistent empfiehlt ${n(rec.cm360, 1)} cm/360° – <a href="#" id="hShow">ansehen</a>` : `${esc(shortName(gameById(S.game)))} ${fmtSens(S.sens)} · ${S.dpi} DPI`}</p>
+          ${rec ? `<p style="margin:10px 0 0"><span class="badge ${rec.level === 'warn' ? 'warn' : rec.count >= 2 ? 'ok' : ''}">${rec.count >= 2 ? `${rec.count} Durchläufe · ${rec.level === 'warn' ? 'schwankt' : 'stabil'}` : '1 Durchlauf'}</span></p>` : ''}</div>
+        <div>${top.map((g) => { const st = settingFor(g, yawFor(g), cm, S.dpi); return `<div class="row" style="justify-content:space-between;padding:7px 0;border-bottom:1px solid var(--line)"><span class="muted">${esc(shortName(g))}</span><b style="font-variant-numeric:tabular-nums">${st.text}</b></div>`; }).join('')}
+          <div class="row" style="margin-top:14px"><button id="hGames">${icon('gamepad-2', 16)} Alle Spiele</button><button class="ghost" id="hWiz">${icon('refresh-cw', 16)} Erneut testen</button></div></div>
+      </div></div>`;
+  const tile = (id, ic, title, text) => `<div class="card click" id="${id}"><h3 style="color:var(--accent)">${icon(ic, 20)}</h3><h3 style="margin-bottom:4px">${title}</h3><p class="muted" style="margin:0"><small>${text}</small></p></div>`;
+  el.innerHTML = head(`${hello}!`, 'Schön, dass du da bist. Hier ist dein Überblick.') + hero + `
+    <div class="cards" style="margin-top:14px">
+      ${tile('qWarm', 'flame', 'Aufwärmen', '2 Minuten, vier Szenarien am Stück – ideal vor dem Spielen.')}
+      ${tile('qTrain', 'crosshair', 'Training', `${Object.values(MODES).filter((m) => !m.hidden).length} Szenarien für Flicks, Tracking, bewegte Ziele und Reaktion.`)}
+      ${tile('qProfile', 'radar', 'Fähigkeitsprofil', prof ? `Zuletzt ${prof.overall} Punkte · Fokus: ${weakest(prof).name}` : 'Finde deine Stärken und Schwächen in 3,5 Minuten.')}
+      ${tile('qMouse', 'mouse', 'Maus prüfen', S.dpiMeasured ? `DPI gemessen: ${S.dpi}. Raw Input und Abfragerate prüfen.` : 'DPI mit dem Lineal nachmessen, Raw Input und Abfragerate prüfen.')}
+    </div>
+    <h3 style="margin-top:28px">Zuletzt gespielt</h3>
+    ${recent.length ? `<div class="card" style="padding:6px 20px">${recent.map((r) => `<div class="row" style="justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--line)">
+        <span><b>${MODES[r.mode].name}</b> <small>${new Date(r.date).toLocaleString('de-DE', { dateStyle: 'short', timeStyle: 'short' })}${r.warmup ? ' · Aufwärmen' : r.profile ? ' · Profiltest' : ''}</small></span>
+        <span style="font-variant-numeric:tabular-nums"><b>${r.score}</b> <small>Punkte · ${n(r.acc, 1)} %</small></span></div>`).join('')}</div>`
+      : `<div class="card" style="text-align:center;padding:34px"><div style="color:var(--muted)">${icon('target', 30)}</div><p class="muted" style="margin:10px 0 0">Noch keine Runden gespielt. Starte mit dem Sens-Assistenten oder einer Trainingsrunde.</p></div>`}`;
+  const go = (pg) => () => { page = pg; render(); };
+  $('hWiz').onclick = () => { wiz = null; page = 'wizard'; render(); };
+  if ($('hGames')) $('hGames').onclick = go('sens');
+  if ($('hShow')) $('hShow').onclick = (e) => { e.preventDefault(); if (wiz?.step === 'result') { page = 'wizard'; render(); } else { page = 'sens'; render(); } };
+  $('qWarm').onclick = () => startWarmup(() => { page = 'home'; render(); });
+  $('qTrain').onclick = go('train');
+  $('qProfile').onclick = go('profile');
+  $('qMouse').onclick = () => mouseCheck(render);
 }
 
 // ----- Statistik -----
@@ -944,7 +1192,7 @@ function trendText(runs, metric) {
   const d = metric === 'acc' ? lastAvg - first : ((lastAvg / first) - 1) * 100;
   const unit = metric === 'acc' ? ' Prozentpunkte' : ' %';
   if (Math.abs(d) < (metric === 'acc' ? 1 : 3)) return `Stabil: deine letzten ${k} Runden liegen etwa auf dem Niveau deiner ersten ${k}.`;
-  return `${d > 0 ? '📈 Besser' : '📉 Schwächer'}: deine letzten ${k} Runden liegen im Schnitt ${n(Math.abs(d), 1)}${unit} ${d > 0 ? 'über' : 'unter'} deinen ersten ${k}.`;
+  return `${d > 0 ? 'Besser' : 'Schwächer'}: deine letzten ${k} Runden liegen im Schnitt ${n(Math.abs(d), 1)}${unit} ${d > 0 ? 'über' : 'unter'} deinen ersten ${k}.`;
 }
 
 function pageStats(el) {
@@ -965,7 +1213,7 @@ function pageStats(el) {
   }
   const rows = history.slice(-40).reverse().map((r) => {
     const d = new Date(r.date).toLocaleString('de-DE', { dateStyle: 'short', timeStyle: 'short' });
-    if (r.mode === 'finderResult') return `<tr><td>${d}</td><td>Sens-Finder</td><td class="num" colspan="2">Ergebnis übernommen</td><td class="num">${n(r.cm360, 1)}</td></tr>`;
+    if (r.mode === 'finderResult') return `<tr><td>${d}</td><td>Sens-Assistent</td><td class="num" colspan="2">Ergebnis übernommen</td><td class="num">${n(r.cm360, 1)}</td></tr>`;
     return `<tr class="expand" data-date="${r.date}"><td><span class="arrow">▸</span> ${d}</td><td>${MODES[r.mode]?.name ?? r.mode}${r.warmup ? ' <small>(Aufwärmen)</small>' : ''}${r.profile ? ' <small>(Profiltest)</small>' : ''}</td><td class="num">${r.score}</td><td class="num">${n(r.acc, 1)} %</td><td class="num">${n(r.cm360, 1)}</td></tr>`;
   }).join('');
   el.innerHTML = `<h2>Statistik</h2>
@@ -1010,24 +1258,25 @@ function pageStats(el) {
     tr.querySelector('.arrow').textContent = '▾';
     showResultBody(row.querySelector('.detailbox'), r);
   }));
-  $('sClear').onclick = () => {
-    if (confirm('Gesamten Verlauf löschen?')) {
+  $('sClear').onclick = async () => {
+    if (await confirmDialog({ title: 'Gesamten Verlauf löschen?', text: 'Alle Runden, Trefferbilder und Diagramme werden entfernt. Das lässt sich nicht rückgängig machen – exportiere vorher, wenn du sie behalten willst.', ok: 'Löschen', danger: true })) {
       history = []; save('aimforge.history', history);
       try { localStorage.removeItem(DETAIL_KEY); } catch { /* egal */ }
-      if (profiles.length && confirm('Auch alle Fähigkeitsprofile löschen?')) { profiles = []; saveProfiles(); }
+      if (profiles.length && await confirmDialog({ title: 'Auch alle Fähigkeitsprofile löschen?', ok: 'Ja, löschen', cancel: 'Profile behalten', danger: true })) { profiles = []; saveProfiles(); }
+      toast('Verlauf gelöscht');
       render();
     }
   };
   $('sExport').onclick = () => download(`aimforge-daten-${new Date().toISOString().slice(0, 10)}.json`,
-    JSON.stringify({ app: 'AimForge', version: 1, exported: Date.now(), settings: S, history, details: load(DETAIL_KEY, {}), profiles }), 'application/json');
+    JSON.stringify({ app: 'AimForge', version: 1, exported: Date.now(), settings: S, history, details: load(DETAIL_KEY, {}), profiles, sensRuns }), 'application/json');
   $('sImport').onclick = () => $('sFile').click();
   $('sFile').onchange = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
     const msg = $('sMsg');
     let data;
-    try { data = JSON.parse(await file.text()); } catch { msg.textContent = '⚠️ Die Datei ist keine gültige AimForge-Datei (kein JSON).'; return; }
-    if (!data || !Array.isArray(data.history)) { msg.textContent = '⚠️ In der Datei wurde kein Verlauf gefunden.'; return; }
+    try { data = JSON.parse(await file.text()); } catch { msg.textContent = 'Die Datei ist keine gültige AimForge-Datei (kein JSON).'; return; }
+    if (!data || !Array.isArray(data.history)) { msg.textContent = 'In der Datei wurde kein Verlauf gefunden.'; return; }
     const valid = data.history.map(cleanRun).filter(Boolean);
     const known = new Set(history.map((r) => r.date));
     const added = valid.filter((r) => !known.has(r.date));
@@ -1052,8 +1301,15 @@ function pageStats(el) {
       const okP = data.profiles.map(cleanProfile).filter((x) => x && !knownP.has(x.date));
       if (okP.length) { profiles = [...profiles, ...okP].sort((a, b) => a.date - b.date); saveProfiles(); profNote = ` ${okP.length} Profil${okP.length === 1 ? '' : 'e'} importiert.`; }
     }
+    if (Array.isArray(data.sensRuns)) {
+      const knownR = new Set(sensRuns.map((x) => x.date));
+      const okR = data.sensRuns.filter((x) => x && Number(x.date) > 0 && Number(x.cm360) > 0 && !knownR.has(Number(x.date)))
+        .map((x) => ({ date: Number(x.date), cm360: Number(x.cm360), found: Number(x.found) || Number(x.cm360), base: Number(x.base) || NaN, dpi: Number(x.dpi) || S.dpi,
+          game: GAMES.some((g) => g.id === x.game) ? x.game : 'cs2', rounds: Number(x.rounds) || 6, length: TEST_LENGTHS[x.length] ? x.length : 'normal' }));
+      if (okR.length) { sensRuns = [...sensRuns, ...okR].sort((a, b) => a.date - b.date); saveRuns(); }
+    }
     let settingsNote = '';
-    if (data.settings && typeof data.settings === 'object' && confirm('Auch die Einstellungen (Sensitivität, DPI, Kalibrierungen, Fadenkreuz …) aus der Datei übernehmen?')) {
+    if (data.settings && typeof data.settings === 'object' && await confirmDialog({ title: 'Einstellungen übernehmen?', text: 'Die Datei enthält auch Einstellungen (Sensitivität, DPI, Kalibrierungen, Fadenkreuz …). Sollen sie deine aktuellen ersetzen?', ok: 'Übernehmen', cancel: 'Nur Verlauf' })) {
       for (const k of Object.keys(DEFAULTS)) {
         const v = data.settings[k];
         // nur Werte vom passenden Typ übernehmen; Farben nur als #rrggbb
@@ -1069,7 +1325,8 @@ function pageStats(el) {
       settingsNote = ' Einstellungen übernommen.';
     }
     render();
-    $('sMsg').textContent = `✔ ${added.length} neue Runde${added.length === 1 ? '' : 'n'} importiert (${valid.length - added.length} waren schon vorhanden).${profNote}${settingsNote}`;
+    toast(`${added.length} neue Runde${added.length === 1 ? '' : 'n'} importiert`);
+    $('sMsg').textContent = `${added.length} neue Runde${added.length === 1 ? '' : 'n'} importiert (${valid.length - added.length} waren schon vorhanden).${profNote}${settingsNote}`;
   };
 }
 
@@ -1173,7 +1430,8 @@ function mouseCheck(onClose) {
           : line(null, 'DPI: nicht gemessen', 'Für die DPI-Messung alle drei 10-cm-Strecken durchführen.')}
         <div class="row" style="margin-top:12px">${dpi && Math.abs(dev) > 3 ? `<button class="primary" id="mcApply">${Math.round(dpi)} DPI übernehmen</button>` : ''}
           <button id="mcAgain">Nochmal prüfen</button><button id="mcClose">Schließen</button></div>`);
-      if ($('mcApply')) $('mcApply').onclick = () => { S.dpi = Math.round(dpi); saveSettings(); overlay(null); onClose(); };
+      if (dpi && Math.abs(dev) <= 3 && spread <= 4) { S.dpiMeasured = true; saveSettings(); }
+      if ($('mcApply')) $('mcApply').onclick = () => { S.dpi = Math.round(dpi); S.dpiMeasured = true; saveSettings(); overlay(null); toast(`DPI auf ${Math.round(dpi)} gesetzt`); onClose(); };
       $('mcAgain').onclick = () => mouseCheck(onClose);
       $('mcClose').onclick = () => { overlay(null); onClose(); };
     }
@@ -1200,7 +1458,7 @@ function pageSettings(el) {
     <div class="card" style="margin-top:14px"><h3>Eingabe & Ton</h3>
       <label style="color:var(--text)"><input type="checkbox" id="sRaw" style="width:auto" ${S.raw ? 'checked' : ''}> Raw Input (umgeht die Mausbeschleunigung des Betriebssystems, empfohlen)</label>
       <label style="color:var(--text)"><input type="checkbox" id="sSound" style="width:auto" ${S.sound ? 'checked' : ''}> Trefferton</label>
-      <p class="muted"><small>${engine.rawActive === false ? '⚠️ Dein Browser hat Raw Input zuletzt abgelehnt – die Messwerte können durch Mausbeschleunigung verfälscht sein. ' : ''}
+      <p class="muted"><small>${engine.rawActive === false ? 'Achtung: Raw Input wurde zuletzt abgelehnt Raw Input zuletzt abgelehnt – die Messwerte können durch Mausbeschleunigung verfälscht sein. ' : ''}
       Ohne Raw Input sollte die Windows-Zeigergeschwindigkeit auf 6/11 stehen und „Zeigerbeschleunigung verbessern“ aus sein.</small></p></div>`;
   const num = (id, k) => ($(id).oninput = (e) => { const v = parseFloat(e.target.value); if (v > 0) { S[k] = v; saveSettings(); } });
   num('sFov', 'fov'); num('sXhSize', 'xhSize');

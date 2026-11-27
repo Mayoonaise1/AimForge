@@ -28,6 +28,8 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1' # für die Web-Version nicht nötig
       - run: npm run build
       - name: Seite zusammenstellen
         run: mkdir -p _site && cp dist/AimForge.html _site/index.html
