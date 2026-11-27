@@ -12,6 +12,7 @@ const DEFAULTS = {
   dpi: 800, game: 'cs2', sens: 1.25, fov: 103, raw: true, sound: true,
   xhStyle: 'cross', xhColor: '#4fd1a5', xhSize: 7, targetColor: '#ff4d5e',
   finderRounds: 6, testLength: 'normal', warmupFirst: true, dpiMeasured: false,
+  weapon: false, weaponSound: true, weaponVolume: 0.7,
   myGames: ['cs2', 'valorant', 'apex', 'ow2', 'cod', 'fortnite', 'bf6', 'wardogs'],
   calib: {}, // gameId -> { yaw, sens, cm, dpi, date } aus dem 360°-Test
 };
@@ -139,6 +140,32 @@ function download(name, text, type) {
 // ---------- Engine & Sound ----------
 const engine = new Engine($('game'));
 let audio;
+/** Schussgeräusch der Pistole: Knall (gefiltertes Rauschen) + tiefer Wumms + Schlitten-Klick – alles synthetisch */
+let noiseBuf = null;
+function gunshot() {
+  if (!S.weaponSound) return;
+  audio ??= new AudioContext();
+  const t = audio.currentTime, vol = S.weaponVolume ?? 0.7;
+  if (!noiseBuf) {
+    noiseBuf = audio.createBuffer(1, audio.sampleRate * 0.35, audio.sampleRate);
+    const d = noiseBuf.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / d.length) ** 2;
+  }
+  const out = audio.createGain(); out.gain.value = vol; out.connect(audio.destination);
+  const n = audio.createBufferSource(); n.buffer = noiseBuf;
+  const lp = audio.createBiquadFilter(); lp.type = 'lowpass';
+  lp.frequency.setValueAtTime(5200, t); lp.frequency.exponentialRampToValueAtTime(700, t + 0.18);
+  const ng = audio.createGain(); ng.gain.setValueAtTime(0.9, t); ng.gain.exponentialRampToValueAtTime(0.001, t + 0.26);
+  n.connect(lp).connect(ng).connect(out); n.start(t); n.stop(t + 0.3);
+  const o = audio.createOscillator(); o.type = 'sine';
+  o.frequency.setValueAtTime(160, t); o.frequency.exponentialRampToValueAtTime(42, t + 0.14);
+  const og = audio.createGain(); og.gain.setValueAtTime(0.85, t); og.gain.exponentialRampToValueAtTime(0.001, t + 0.18);
+  o.connect(og).connect(out); o.start(t); o.stop(t + 0.2);
+  const c = audio.createOscillator(); c.type = 'square'; c.frequency.value = 2400; // Schlitten
+  const cg = audio.createGain(); cg.gain.setValueAtTime(0, t + 0.045); cg.gain.linearRampToValueAtTime(0.08, t + 0.05); cg.gain.exponentialRampToValueAtTime(0.001, t + 0.075);
+  c.connect(cg).connect(out); c.start(t + 0.04); c.stop(t + 0.09);
+}
+
 function sound(kind) {
   if (!S.sound) return;
   audio ??= new AudioContext();
@@ -199,6 +226,10 @@ function play(modeId, opts = {}) {
   engine.setSensitivity(cm, S.dpi);
   engine.setFov(S.fov);
   engine.targetColor.set(S.targetColor);
+  engine.setWeapon(S.weapon);
+  engine.onFire = gunshot;
+  engine.armed = false;
+  if (S.weapon && !opts.continueLocked) engine.weapon.draw();
   drawCrosshair();
   session = new Session(engine, modeId, { duration: opts.duration, sound: fx });
   playing = { modeId, opts, cm, state: 'ready' };
@@ -245,6 +276,7 @@ engine.onLockChange = (locked) => {
 
 function startCountdown() {
   playing.state = 'countdown';
+  engine.armed = true;
   let c = 3;
   const el = $('countdown');
   const draw = () => { el.innerHTML = `<div class="cd-title">${esc(playing.opts.title || MODES[playing.modeId].name)}</div><div class="cd-num">${c}</div>`; };
@@ -261,6 +293,7 @@ function startCountdown() {
 }
 
 function abort() {
+  engine.armed = false;
   const p = playing;
   session?.stop();
   playing = null;
@@ -273,6 +306,7 @@ function abort() {
 function finish() {
   const p = playing;
   playing = null;
+  engine.armed = false;
   const keep = p.opts.keepLock && engine.locked;
   if (!keep) engine.unlock();
   const res = session.results();
@@ -350,7 +384,7 @@ function bestOf(mode) {
 function pageTrain(el) {
   const card = ([id, m]) => {
     const best = bestOf(id);
-    const how = m.type === 'track' ? 'Fadenkreuz draufhalten' : m.type === 'reaction' ? 'Warten, dann klicken' : m.hp ? `${m.hp} Treffer pro Ziel` : 'Klicken';
+    const how = m.type === 'track' ? 'Fadenkreuz draufhalten' : m.type === 'reaction' ? 'Warten, dann klicken' : m.type === 'arena' ? 'Gegner ausschalten' : m.hp ? `${m.hp} Treffer pro Ziel` : 'Klicken';
     return `<div class="card click" data-mode="${id}"><h3>${m.name}</h3><p class="muted">${m.desc}</p>
       <small>${m.duration} s · ${how}</small>
       ${best !== null ? `<div class="best">Bestwert: ${best}</div>` : ''}</div>`;
@@ -360,7 +394,9 @@ function pageTrain(el) {
     return list.length ? `<h3 style="margin:22px 0 10px">${title}</h3><div class="cards">${list.map(card).join('')}</div>` : '';
   }).join('');
   el.innerHTML = `<h2>Training</h2><p class="muted">Wähle ein Szenario. Gespielt wird mit deiner Sensitivität
-    (${n(curCm(), 1)} cm/360°, Seite „Sensitivität“) und ${n(S.fov, 1)}° FOV (Einstellungen).</p>
+    (${n(curCm(), 1)} cm/360°, Seite „Meine Spiele“) und ${n(S.fov, 1)}° FOV (Einstellungen).</p>
+    <div class="row" style="margin:-10px 0 18px"><label class="chip ${S.weapon ? 'on' : ''}" style="margin:0"><input type="checkbox" id="tWeapon" ${S.weapon ? 'checked' : ''}>${icon('crosshair', 15)} Pistole ${S.weapon ? 'an' : 'aus'}</label>
+      <small>Optisch wie im Shooter – mit Rückstoß und Schussgeräusch.</small></div>
     ${profiles.length ? (() => { const w = weakest(profiles[profiles.length - 1]); return `<div class="card click" id="focusCard" style="margin-bottom:14px;border-color:var(--warn)">
       <h3>${icon('target', 18)} Dein Fokus: ${w.name}</h3><p class="muted" style="margin:0">Laut deinem letzten Profiltest deine schwächste Fähigkeit.
       ${w.focus.map((m) => MODES[m].name).join(' → ')} in normaler Länge – klicken zum Starten.</p></div>`; })() : ''}
@@ -373,6 +409,7 @@ function pageTrain(el) {
     („Zeigerbeschleunigung verbessern“) aus. Spiele im Vollbild (F11), damit nichts ablenkt.</p></div>`;
   el.querySelectorAll('[data-mode]').forEach((c) => (c.onclick = () => play(c.dataset.mode)));
   $('warmupCard').onclick = () => startWarmup(() => { page = 'train'; render(); });
+  $('tWeapon').onchange = (e) => { S.weapon = e.target.checked; saveSettings(); render(); };
   if ($('focusCard')) $('focusCard').onclick = () => startFocus(weakest(profiles[profiles.length - 1]));
 }
 
@@ -517,6 +554,11 @@ function resultStats(r) {
   if (r.onTarget !== undefined) {
     return stat('Punkte', r.score) + stat('Zeit am Ziel', n(r.onTarget, 1) + ' %') +
       (r.switchTime !== undefined ? stat('Umschaltzeit (Median)', ms(r.switchTime)) + stat('Zielwechsel', r.switches) : '') + cm;
+  }
+  if (m.type === 'arena') {
+    return stat('Punkte', r.score) + stat('Ausgeschaltet', r.kills) + stat('Kopftreffer', `${r.headshots} (${pct(r.headshotRate)})`) +
+      stat('Treffer', `${r.hits}/${r.shots}`) + stat('Genauigkeit', n(r.acc, 1) + ' %') +
+      stat('Reaktion ab Sichtbarkeit', ms(r.visReaction)) + stat('Ausgeschaltet pro Minute', n(r.kpm, 1)) + cm;
   }
   if (m.type === 'reaction') {
     return stat('Punkte', r.score) + stat('Reaktionszeit (Median)', ms(r.reactionMedian)) + stat('Schnellste Reaktion', ms(r.reactionBest)) +
@@ -1319,7 +1361,8 @@ function progressChart(box, runs, metric) {
 const RUN_NUM = ['date', 'duration', 'score', 'acc', 'hits', 'shots', 'kps', 'flicks', 'avgTtk', 'reaction', 'ratio',
   'overshootRate', 'undershootRate', 'correction', 'onTarget', 'cm360', 'sensInGame',
   'kills', 'reactionMedian', 'reactionBest', 'early', 'missedTargets', 'switchTime', 'switches',
-  'cleanRate', 'corrections', 'efficiency', 'missClicks', 'missOver', 'missEarly', 'missShort', 'missSide'];
+  'cleanRate', 'corrections', 'efficiency', 'missClicks', 'missOver', 'missEarly', 'missShort', 'missSide',
+  'headshots', 'headshotRate', 'visReaction', 'kpm'];
 function cleanRun(r) {
   if (!r || typeof r !== 'object' || !(MODES[r.mode] || r.mode === 'finderResult')) return null;
   const out = { mode: r.mode };
@@ -1631,6 +1674,13 @@ function pageSettings(el) {
     <div class="card" style="margin-top:14px"><h3>Maus prüfen</h3>
       <p class="muted">Prüft Raw Input, Abfragerate und Eingabegerät und misst mit einem Lineal die echte DPI deiner Maus.</p>
       <button class="primary" id="sCheck">Mausprüfung starten</button></div>
+    <div class="card" style="margin-top:14px"><h3>${icon('crosshair', 18)} Waffe</h3>
+      <p class="muted"><small>Zeigt eine stilisierte Pistole mit Rückstoß, Mündungsfeuer und Hülsenauswurf – wie in einem Shooter.
+      Rein optisch: Das Fadenkreuz und die Messungen bleiben exakt.</small></p>
+      <label style="color:var(--text)"><input type="checkbox" id="sWeapon" ${S.weapon ? 'checked' : ''}> Pistole anzeigen</label>
+      <label style="color:var(--text)"><input type="checkbox" id="sWeaponSound" ${S.weaponSound ? 'checked' : ''}> Schussgeräusch</label>
+      <div style="max-width:320px"><label>Lautstärke Schuss</label><input type="range" id="sWeaponVol" min="0" max="1" step="0.05" value="${S.weaponVolume}" style="padding:0">
+        <button id="sWeaponTest" style="margin-top:8px;padding:6px 12px">${icon('play', 15)} Probeschuss anhören</button></div></div>
     <div class="card" style="margin-top:14px"><h3>Eingabe & Ton</h3>
       <label style="color:var(--text)"><input type="checkbox" id="sRaw" style="width:auto" ${S.raw ? 'checked' : ''}> Raw Input (umgeht die Mausbeschleunigung des Betriebssystems, empfohlen)</label>
       <label style="color:var(--text)"><input type="checkbox" id="sSound" style="width:auto" ${S.sound ? 'checked' : ''}> Trefferton</label>
@@ -1644,6 +1694,10 @@ function pageSettings(el) {
   $('sTColor').oninput = (e) => { S.targetColor = e.target.value; saveSettings(); };
   $('sRaw').onchange = (e) => { S.raw = e.target.checked; saveSettings(); };
   $('sSound').onchange = (e) => { S.sound = e.target.checked; saveSettings(); };
+  $('sWeapon').onchange = (e) => { S.weapon = e.target.checked; saveSettings(); toast(S.weapon ? 'Pistole an' : 'Pistole aus'); };
+  $('sWeaponSound').onchange = (e) => { S.weaponSound = e.target.checked; saveSettings(); };
+  $('sWeaponVol').oninput = (e) => { S.weaponVolume = +e.target.value; saveSettings(); };
+  $('sWeaponTest').onclick = () => { const o = S.weaponSound; S.weaponSound = true; gunshot(); S.weaponSound = o; };
   if ($('sFovGame')) $('sFovGame').onclick = (e) => { e.preventDefault(); S.fov = g.fov; saveSettings(); render(); };
 }
 

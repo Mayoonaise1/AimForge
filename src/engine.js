@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { Pistol } from './weapon.js';
 
 const DEG = Math.PI / 180;
 export const TARGET_DIST = 15;
@@ -12,6 +13,7 @@ export class Engine {
     this.canvas = canvas;
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    this.renderer.autoClear = false; // zwei Durchgänge: Welt, danach die Waffe (eigene Tiefe)
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color(0x1b1f27);
     this.camera = new THREE.PerspectiveCamera(70, 1, 0.05, 500);
@@ -28,6 +30,14 @@ export class Engine {
     this.onMouseUp = null;
     this.onLockChange = null;
     this.targetColor = new THREE.Color('#ff4d5e');
+    this.weapon = null;       // Pistole (optional)
+    this.weaponOn = false;
+    this.onFire = null;       // Schussgeräusch
+    this._lookAcc = { x: 0, y: 0 };
+    this._lastRender = performance.now();
+    // Mündungslicht in der Welt (hellt die Umgebung beim Schuss kurz auf)
+    this.muzzleLight = new THREE.PointLight(0xffb45a, 0, 14, 2);
+    this.scene.add(this.muzzleLight);
 
     this._buildRoom();
     this._bindInput();
@@ -54,7 +64,7 @@ export class Engine {
     tex.repeat.set(16, 8);
     tex.anisotropy = 8;
     tex.colorSpace = THREE.SRGBColorSpace;
-    const room = new THREE.Mesh(
+    const room = this.room = new THREE.Mesh(
       new THREE.BoxGeometry(80, 40, 80),
       new THREE.MeshStandardMaterial({ map: tex, side: THREE.BackSide, roughness: 1 })
     );
@@ -78,12 +88,15 @@ export class Engine {
       let dx = e.movementX, dy = e.movementY;
       // Schutz gegen einen bekannten Browser-Fehler mit riesigen Einzelsprüngen
       if (Math.abs(dx) > 3000 || Math.abs(dy) > 3000) return;
+      const oy = this.y;
       this.x += dx * this.degPerCount;
       this.y = Math.max(-89, Math.min(89, this.y - dy * this.degPerCount));
+      this._lookAcc.x += dx * this.degPerCount; this._lookAcc.y += this.y - oy;
       this.onLook?.(e.timeStamp, this.x, this.y);
     });
     document.addEventListener('mousedown', (e) => {
       if (!this.locked || e.button !== 0) return;
+      if (this.weaponOn && this.armed) { this.weapon.fire(); this.onFire?.(); }
       this.onShoot?.(e.timeStamp);
     });
     document.addEventListener('mouseup', (e) => {
@@ -134,6 +147,13 @@ export class Engine {
     this.renderer.setSize(w, h, false);
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
+    this.weapon?.resize(w / h);
+  }
+
+  /** Pistole ein-/ausschalten (rein optisch) */
+  setWeapon(on) {
+    this.weaponOn = !!on;
+    if (on && !this.weapon) { this.weapon = new Pistol(); this.weapon.resize(this.camera.aspect); }
   }
 
   resetView() {
@@ -224,6 +244,19 @@ export class Engine {
     });
     this.camera.position.set(0, 1.6, 0);
     this.camera.rotation.set(this.y * DEG, -this.x * DEG, 0);
+    const dt = (now - this._lastRender) / 1000;
+    this._lastRender = now;
+    this.renderer.clear();
+    if (this.weaponOn) {
+      this.weapon.update(dt, this._lookAcc.x, this._lookAcc.y);
+      this.muzzleLight.position.copy(this.camera.position).add(Engine.dirOf(this.x, this.y).multiplyScalar(0.6));
+      this.muzzleLight.intensity = this.weapon.flash * 6;
+    } else this.muzzleLight.intensity = 0;
+    this._lookAcc.x = this._lookAcc.y = 0;
     this.renderer.render(this.scene, this.camera);
+    if (this.weaponOn) {
+      this.renderer.clearDepth();
+      this.renderer.render(this.weapon.scene, this.weapon.camera);
+    }
   }
 }

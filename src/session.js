@@ -1,4 +1,6 @@
 import { analyzePath, summarize, pathsOf } from './analysis.js';
+import { Arena } from './arena.js';
+import { Engine } from './engine.js';
 
 const rand = (a, b) => a + Math.random() * (b - a);
 const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
@@ -17,6 +19,7 @@ function spawnAway(view, bounds, minD, avoid = []) {
 }
 
 export const CATEGORIES = {
+  shooter: 'Shooter – Gegner mit Deckung',
   click: 'Klicken – stehende Ziele',
   move: 'Bewegte Ziele',
   track: 'Tracking – Ziel verfolgen',
@@ -84,6 +87,11 @@ export const MODES = {
     desc: 'Warte, bis ein Ziel aufblitzt, und triff es so schnell wie möglich. Zu frühes Klicken kostet Punkte.',
     type: 'reaction', duration: 45, radius: 1.6, flickAnalysis: false,
   },
+  arena: {
+    name: 'Arena', cat: 'shooter',
+    desc: 'Gegner laufen in einer 3D-Umgebung zwischen Kisten, Mauern und Säulen, strafen und verschwinden hinter Deckung. Kopftreffer schaltet sofort aus, Körper braucht 2 Treffer.',
+    type: 'arena', duration: 60, flickAnalysis: false,
+  },
   finder: {
     name: 'Sens-Test', cat: 'click',
     desc: 'Gemischte Flick-Distanzen (5–40°). Wird vom Sensitivitäts-Finder genutzt.',
@@ -131,6 +139,9 @@ export class Session {
     this.points = 0;
     // Zielwechsel
     this.switchTimes = [];
+    // Arena
+    this.headshots = 0;
+    this.visReactions = [];
   }
 
   view() {
@@ -160,6 +171,10 @@ export class Session {
       if (n > 1) this._activate(Math.floor(Math.random() * n), now);
     } else if (m.type === 'reaction') {
       this.nextAt = now + rand(900, 2000);
+    } else if (m.type === 'arena') {
+      this.arena = new Arena(e);
+      this.arena.attach();
+      this.arena.start(now);
     }
     e.onLook = (t, x, y) => this.samples.push({ t, x, y });
     e.onShoot = (t) => this._shoot(t);
@@ -203,6 +218,7 @@ export class Session {
   _shoot(t) {
     if (!this.running) return;
     if (this.mode.type === 'reaction') return this._shootReaction(t);
+    if (this.mode.type === 'arena') return this._shootArena(t);
     if (this.mode.type !== 'click') return;
     this.shots++;
     const hit = this.engine.pick();
@@ -230,6 +246,23 @@ export class Session {
     this.engine.burst(hit);
     this.engine.removeTarget(hit);
     this._spawn(t);
+  }
+
+  _shootArena(t) {
+    const e = this.engine;
+    this.shots++;
+    const near = this.arena.nearestAngular(e.x, e.y);
+    const res = this.arena.shoot(Engine.dirOf(e.x, e.y), t);
+    if (near) this.shotLog.push({ dx: near.dx, dy: near.dy, r: near.r, hit: res.hit, ux: null, uy: null, moving: true });
+    if (!res.hit) { this.sound?.('miss'); return; }
+    this.hits++;
+    this.lastHitTime = t;
+    if (res.killed) {
+      this.kills++;
+      if (res.headshot) this.headshots++;
+      if (res.reaction != null) this.visReactions.push(res.reaction);
+      this.sound?.('hit');
+    } else this.sound?.('tick');
   }
 
   _shootReaction(t) {
@@ -314,6 +347,8 @@ export class Session {
         this.shotLog.push({ dx: e.x - tr.x, dy: e.y - tr.y, r: tr.radiusDeg, hit: on, ux: tr.motion.vx / v, uy: tr.motion.vy / v, track: true });
       }
       tr.mesh.material.emissiveIntensity = on ? 0.9 : 0.3;
+    } else if (m.type === 'arena') {
+      this.arena.update(dt, now);
     } else if (m.type === 'reaction') {
       const target = [...e.targets][0];
       if (!target && now >= this.nextAt) {
@@ -342,12 +377,14 @@ export class Session {
     for (const t of this.engine.targets) if (t.born) t.born += gap;
     if (this.nextAt) this.nextAt += gap;
     if (this.switchAt) { this.switchAt += gap; this.switchStart += gap; }
+    this.arena?.shift(gap);
     this.paused = false;
     this.lastFrame = now;
   }
 
   stop() {
     this.running = false;
+    if (this.arena) { this.arena.detach(); this.arena = null; }
     this.engine.onLook = this.engine.onShoot = null;
     this.engine.clearTargets();
   }
@@ -360,6 +397,7 @@ export class Session {
     }
     const acc = this.shots ? (this.hits / this.shots) * 100 : 100;
     if (this.mode.type === 'reaction') return { left, score: Math.max(0, this.points), acc };
+    if (this.mode.type === 'arena') return { left, score: Math.round((this.kills * 100 + this.headshots * 50) * acc / 100), acc };
     return { left, score: Math.round(this.hits * acc), acc };
   }
 
@@ -370,6 +408,11 @@ export class Session {
       const r = { ...base, onTarget: live.acc };
       if (this.movers.length > 1) { r.switchTime = median(this.switchTimes); r.switches = this.switchTimes.length; }
       return r;
+    }
+    if (this.mode.type === 'arena') {
+      return { ...base, hits: this.hits, shots: this.shots, kills: this.kills, headshots: this.headshots,
+        headshotRate: this.kills ? this.headshots / this.kills : NaN, visReaction: median(this.visReactions),
+        kpm: this.kills / (this.duration / 60000) };
     }
     if (this.mode.type === 'reaction') {
       return {

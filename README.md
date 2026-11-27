@@ -31,6 +31,10 @@ Eine Web-Version läuft zusätzlich unter https://mayoonaise1.github.io/AimForge
   Diagramm als Weg (von oben) oder als Verlauf über die Zeit
 - **Battlefield 6** – nutzt die cm/360°-Anzeige im Spielmenü: AimForge sagt, welcher Wert dort stehen soll (exakt, ohne Umrechnung),
   und übernimmt den aktuellen BF6-Wert auf Wunsch als Ausgangspunkt
+- **Arena (Shooter)** – 3D-Umgebung mit Kisten, Mauern und Säulen; Low-Poly-Gegner laufen, strafen und verschwinden hinter
+  Deckung; Treffer mit Sichtlinie, Kopftreffer = sofort, Körper = 2 Treffer; gemessen wird u. a. die Reaktionszeit ab Sichtbarkeit
+- **Pistole (optional)** – stilisierte Low-Poly-Pistole mit Rückstoß, Schlitten, Mündungsfeuer, Hülsenauswurf, Mitschwingen und
+  synthetischem Schussgeräusch; rein optisch, Messungen bleiben exakt (Einstellungen oder Schalter auf der Trainingsseite)
 - **Training** – Klicken (Raster, Flick, Mikro, Panzerziele), bewegte Ziele (Ausweichen), Tracking (Tracking, Zielwechsel),
   Reaktion; Aufwärm-Playlist; Trefferbild und Bewegungsanalyse nach jeder Runde
 - **Fähigkeitsprofil** – 6 × 30 s Testlauf, Stärken/Schwächen, Fokus-Training für die schwächste Fähigkeit
@@ -56,7 +60,7 @@ Aufbau:
 
 - `electron/` – Hauptprozess (Fenster, Raw-Input-Schalter) und Preload-Brücke
 - `src/main.js` – Oberfläche und Seiten · `src/ui.js` – Dialoge/Hinweise · `src/icons.js` – Icons (Lucide, ISC)
-- `src/engine.js` – 3D-Szene und Mauseingabe · `src/session.js` – Szenarien · `src/analysis.js` – Auswertung
+- `src/engine.js` – 3D-Szene und Mauseingabe · `src/weapon.js` – Pistole · `src/arena.js` – Shooter-Arena · `src/session.js` – Szenarien · `src/analysis.js` – Auswertung
 - `src/finder.js` – Sens-Test und Kombination mehrerer Durchläufe · `src/profile.js` – Fähigkeitsprofil
 - `src/games.js` – Spiele, Umrechnung, Rundung
 
