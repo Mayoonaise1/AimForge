@@ -1,11 +1,18 @@
-# Baut die Windows-App (Installer + portable .exe) auf einem Windows-Server von GitHub.
-# Start: automatisch bei einem Versions-Tag (z. B. v2.0.0) oder manuell unter „Actions“.
+# Baut die Windows-App (Installer + portable .exe) auf einem Windows-Server von GitHub
+# und veröffentlicht sie als Release. Die Version kommt aus package.json ("version"):
+# neue Version eintragen + auf main pushen -> neues Release v<version>.
+# Gleiche Version erneut gepusht -> die Dateien des bestehenden Releases werden ersetzt.
 name: Windows-App bauen
 
 on:
   push:
-    tags: ['v*']
+    branches: [main]
+    paths: ['src/**', 'electron/**', 'build/**', 'package.json', 'package-lock.json', 'build.mjs', '.github/workflows/windows-release.yml']
   workflow_dispatch:
+
+concurrency:
+  group: windows-release
+  cancel-in-progress: true
 
 permissions:
   contents: write
@@ -31,16 +38,20 @@ jobs:
           path: release/*.exe
           if-no-files-found: error
       - name: Als Release veröffentlichen
-        if: startsWith(github.ref, 'refs/tags/')
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" release/*.exe \
-            --title "AimForge ${GITHUB_REF_NAME#v}" \
-            --notes "Windows-Version von AimForge.
+          V=$(node -p "require('./package.json').version")
+          TAG="v$V"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" release/*.exe --clobber
+          else
+            gh release create "$TAG" release/*.exe --target "$GITHUB_SHA" --title "AimForge $V" \
+              --notes "Windows-Version von AimForge.
 
-          **Installer:** \`AimForge-Setup-${GITHUB_REF_NAME#v}.exe\` – installiert AimForge mit Startmenü- und Desktop-Verknüpfung.
-          **Portable:** \`AimForge-${GITHUB_REF_NAME#v}-portable.exe\` – ohne Installation, einfach starten.
+          **Installer:** \`AimForge-Setup-$V.exe\` – installiert AimForge mit Startmenü- und Desktop-Verknüpfung.
+          **Portable:** \`AimForge-$V-portable.exe\` – ohne Installation, einfach starten.
 
           Windows zeigt beim ersten Start eventuell „Der Computer wurde durch Windows geschützt“, weil die App nicht kostenpflichtig signiert ist: *Weitere Informationen → Trotzdem ausführen*."
+          fi

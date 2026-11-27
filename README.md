@@ -43,7 +43,8 @@ npm run icons      # App-Icons aus build/icon.svg erzeugen
 ```
 
 Der offizielle Windows-Build läuft über GitHub Actions (`.github/workflows/windows-release.yml`):
-ein Tag wie `v2.0.1` pushen → Installer und portable Version erscheinen auf der Release-Seite.
+in `package.json` eine neue `version` eintragen und auf `main` pushen → Installer und portable Version erscheinen
+als Release `v<version>` auf der Release-Seite.
 
 Aufbau:
 
